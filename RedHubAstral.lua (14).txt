@@ -1,0 +1,2925 @@
+-- Red Hub Astral
+-- All features live in the logic part below and never depend on the menu.
+-- Menu: FluentPro UI when loadstring + HttpGet exist (executor),
+-- otherwise the built-in menu (works as a normal LocalScript).
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local InsertService = game:GetService("InsertService")
+local Stats = game:GetService("Stats")
+local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService")
+
+local player = Players.LocalPlayer
+
+--------------------------------------------------------------------
+-- Settings
+--------------------------------------------------------------------
+local State = {
+	SpeedOn = false, Speed = 50,
+	JumpOn = false, Jump = 100,
+	SpinOn = false, Spin = 20,
+
+	Aimbot = false,
+	AimPart = "Head",
+	Smoothing = 10,
+	FOV = 150,
+	FOVCircle = true,
+	WallCheck = true,
+	Wallbang = false,
+	AutoGun = false,
+	Float = false, FloatHeight = 6,
+	CamFrozen = false,
+	InfJump = false,
+
+	ESPBox = false,
+	ESPChams = false,
+	ESPDistance = false,
+	ESPName = false,
+
+	Headless = false,
+	Korblox = false,
+	LockMurderer = false,
+	Stretch = false,
+	CamFOVOn = false, CamFOV = 70,
+
+	Noclip = false,
+	ESPLines = false,
+	ESPSkeleton = false,
+	ESPDropGun = false,
+	Sky = "Off",
+	Fullbright = false,
+	AntiFling = false,
+	Invisible = false,
+
+	HoldRMB = UIS.MouseEnabled,
+	MenuKey = "RightShift",
+}
+
+local applySky, setWallbang -- defined near the bottom
+
+--------------------------------------------------------------------
+-- Theme (black + white)
+--------------------------------------------------------------------
+local BG = Color3.fromRGB(9, 9, 11)
+local PANEL = Color3.fromRGB(19, 19, 23)
+local TAB_ACTIVE = Color3.fromRGB(36, 36, 42)
+local OFF = Color3.fromRGB(52, 52, 60)
+local BORDER = Color3.fromRGB(38, 38, 45)
+local NEON = Color3.fromRGB(255, 255, 255) -- accent (R button, glow); change for a colored accent
+local ACCENT = NEON
+
+-- Want your own logo? Upload the picture to Roblox (Creator Hub > Decals),
+-- then paste the id here, e.g. "rbxassetid://123456789". Empty = neon letter R.
+local LOGO_IMAGE = ""
+local WHITE = Color3.fromRGB(255, 255, 255)
+local BLACK = Color3.fromRGB(0, 0, 0)
+
+local ROLE_COLORS = {
+	Murderer = Color3.fromRGB(255, 60, 60),
+	Sheriff = Color3.fromRGB(70, 140, 255),
+	Innocent = Color3.fromRGB(70, 255, 110),
+}
+
+local TWEEN = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local function tween(obj, props)
+	TweenService:Create(obj, TWEEN, props):Play()
+end
+
+local function new(class, props, parent)
+	local o = Instance.new(class)
+	for k, v in props do
+		o[k] = v
+	end
+	o.Parent = parent
+	return o
+end
+
+local function corner(obj, r)
+	new("UICorner", {CornerRadius = UDim.new(0, r or 6)}, obj)
+end
+
+local function isPointer(i)
+	return i.UserInputType == Enum.UserInputType.MouseButton1
+		or i.UserInputType == Enum.UserInputType.Touch
+end
+
+local function isMove(i)
+	return i.UserInputType == Enum.UserInputType.MouseMovement
+		or i.UserInputType == Enum.UserInputType.Touch
+end
+
+--------------------------------------------------------------------
+-- Shared UI pieces
+--------------------------------------------------------------------
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Aim FOV circle
+local fovGui = new("ScreenGui", {
+	Name = "FovCircleGui", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 1,
+}, playerGui)
+
+local fovCircle = new("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	BackgroundTransparency = 1,
+	Size = UDim2.fromOffset(300, 300),
+	Visible = true,
+}, fovGui)
+corner(fovCircle, 1000)
+new("UIStroke", {Thickness = 2, Color = WHITE, Transparency = 0.2}, fovCircle)
+
+-- Animated black/white shimmering outline (menu button + info bar)
+local shimmers = {}
+local function addShimmer(stroke, speed)
+	local dark = Color3.fromRGB(14, 14, 14)
+	local g = new("UIGradient", {
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, dark),
+			ColorSequenceKeypoint.new(0.25, WHITE),
+			ColorSequenceKeypoint.new(0.5, dark),
+			ColorSequenceKeypoint.new(0.75, WHITE),
+			ColorSequenceKeypoint.new(1, dark),
+		}),
+	}, stroke)
+	table.insert(shimmers, {g, speed or 80})
+	return g
+end
+RunService.RenderStepped:Connect(function()
+	local t = os.clock()
+	for _, e in shimmers do
+		e[1].Rotation = (t * e[2]) % 360
+	end
+end)
+
+-- Menu <-> State binding helper: K("Key") returns State.Key and tells the next
+-- addToggle/addSlider/addCycle which State key it controls.
+local pendingKey = nil
+local function K(key)
+	pendingKey = key
+	return State[key]
+end
+
+--------------------------------------------------------------------
+-- Local Player: speed / jump / spin
+--------------------------------------------------------------------
+local wasSpeed, wasJump, wasSpin = false, false, false
+
+RunService.Heartbeat:Connect(function(dt)
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not hum or not root then return end
+
+	if State.SpeedOn then
+		hum.WalkSpeed = State.Speed
+	elseif wasSpeed then
+		hum.WalkSpeed = 16
+	end
+	wasSpeed = State.SpeedOn
+
+	if State.JumpOn then
+		hum.UseJumpPower = true
+		hum.JumpPower = State.Jump
+	elseif wasJump then
+		hum.JumpPower = 50
+	end
+	wasJump = State.JumpOn
+
+	if State.SpinOn then
+		hum.AutoRotate = false
+		root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(State.Spin * 10) * dt, 0)
+	elseif wasSpin then
+		hum.AutoRotate = true
+	end
+	wasSpin = State.SpinOn
+end)
+
+--------------------------------------------------------------------
+-- Combat: aim bot + FOV circle + wall check
+--------------------------------------------------------------------
+local KNIFE_NAME = "Knife"
+local GUN_NAME = "Gun"
+
+local function getRole(plr)
+	local char = plr.Character
+	local bp = plr:FindFirstChildOfClass("Backpack")
+	if (char and char:FindFirstChild(KNIFE_NAME)) or (bp and bp:FindFirstChild(KNIFE_NAME)) then
+		return "Murderer"
+	end
+	if (char and char:FindFirstChild(GUN_NAME)) or (bp and bp:FindFirstChild(GUN_NAME)) then
+		return "Sheriff"
+	end
+	return "Innocent"
+end
+
+local function getMurderer()
+	for _, plr in Players:GetPlayers() do
+		local char = plr.Character
+		if plr ~= player and char and getRole(plr) == "Murderer" then
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 then return plr end
+		end
+	end
+end
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function getAimPart(char)
+	if State.AimPart == "Head" then
+		return char:FindFirstChild("Head")
+	elseif State.AimPart == "Torso" then
+		return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+	else
+		return char:FindFirstChild("LeftLowerLeg") or char:FindFirstChild("Left Leg")
+	end
+end
+
+local function isVisible(cam, part, char)
+	rayParams.FilterDescendantsInstances = {player.Character}
+	local origin = cam.CFrame.Position
+	local result = Workspace:Raycast(origin, part.Position - origin, rayParams)
+	return result == nil or result.Instance:IsDescendantOf(char)
+end
+
+local function getTarget(cam)
+	local center = cam.ViewportSize / 2
+	local best, bestDist = nil, State.FOV
+	for _, plr in Players:GetPlayers() do
+		local char = plr.Character
+		if plr ~= player and char then
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			local part = getAimPart(char)
+			if hum and hum.Health > 0 and part then
+				local pos, onScreen = cam:WorldToViewportPoint(part.Position)
+				if onScreen then
+					local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+					if d < bestDist and (not State.WallCheck or isVisible(cam, part, char)) then
+						best, bestDist = part, d
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+RunService:BindToRenderStep("AimBot", Enum.RenderPriority.Camera.Value + 1, function(dt)
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+
+	local vs = cam.ViewportSize
+	fovCircle.Position = UDim2.fromOffset(vs.X / 2, vs.Y / 2)
+	fovCircle.Size = UDim2.fromOffset(State.FOV * 2, State.FOV * 2)
+	fovCircle.Visible = State.FOVCircle
+
+	if State.CamFrozen or not (State.Aimbot or State.LockMurderer) then return end
+	if State.HoldRMB and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+
+	local target
+	if State.LockMurderer then
+		local m = getMurderer()
+		if m then target = getAimPart(m.Character) end
+	end
+	if not target and State.Aimbot then
+		target = getTarget(cam)
+	end
+	if target then
+		local cf = cam.CFrame
+		local goal = CFrame.lookAt(cf.Position, target.Position)
+		cam.CFrame = cf:Lerp(goal, math.clamp(dt * 60 / State.Smoothing, 0, 1))
+	end
+end)
+
+--------------------------------------------------------------------
+-- Visuals: ESP with roles (Murderer / Sheriff / Innocent)
+-- Role detection: Knife tool = Murderer, Gun tool = Sheriff.
+-- If your tools are named differently, change the names below.
+--------------------------------------------------------------------
+local espGui = new("ScreenGui", {
+	Name = "AstralESP", ResetOnSpawn = false, DisplayOrder = 5, IgnoreGuiInset = true,
+}, playerGui)
+
+local espData = {}
+
+local function destroyESP(plr)
+	local d = espData[plr]
+	if d then
+		d.box:Destroy()
+		d.text:Destroy()
+		d.highlight:Destroy()
+		d.line:Destroy()
+		for _, f in d.bones do f:Destroy() end
+		espData[plr] = nil
+	end
+end
+
+local function createESP(plr, char, root, head)
+	local box = new("BillboardGui", {
+		Adornee = root, AlwaysOnTop = true, Size = UDim2.fromScale(4, 6),
+		ResetOnSpawn = false,
+	}, espGui)
+	local boxFrame = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1}, box)
+	local stroke = new("UIStroke", {Thickness = 1.5, Color = WHITE}, boxFrame)
+
+	local text = new("BillboardGui", {
+		Adornee = head, AlwaysOnTop = true, Size = UDim2.fromOffset(200, 36),
+		StudsOffset = Vector3.new(0, 2.6, 0), ResetOnSpawn = false,
+	}, espGui)
+	local label = new("TextLabel", {
+		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, TextColor3 = WHITE,
+		TextStrokeTransparency = 0, Font = Enum.Font.GothamBold, TextSize = 13,
+		TextYAlignment = Enum.TextYAlignment.Bottom,
+	}, text)
+
+	local highlight = new("Highlight", {
+		FillTransparency = 0.5, OutlineTransparency = 0,
+		DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+	}, char)
+
+	local line = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0,
+		BackgroundColor3 = WHITE, Visible = false,
+	}, espGui)
+
+	espData[plr] = {
+		char = char, box = box, stroke = stroke, text = text, label = label,
+		highlight = highlight, line = line, bones = {}, boneMax = 0,
+	}
+	return espData[plr]
+end
+
+local BONES_R15 = {
+	{"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+	{"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+	{"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+	{"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+	{"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+}
+local BONES_R6 = {
+	{"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+	{"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+}
+
+local function drawLine(frame, from, to, color, thickness)
+	local diff = to - from
+	frame.Size = UDim2.fromOffset(diff.Magnitude, thickness)
+	frame.Position = UDim2.fromOffset((from.X + to.X) / 2, (from.Y + to.Y) / 2)
+	frame.Rotation = math.deg(math.atan2(diff.Y, diff.X))
+	frame.BackgroundColor3 = color
+end
+
+RunService.RenderStepped:Connect(function()
+	local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	local anyOn = State.ESPBox or State.ESPChams or State.ESPDistance or State.ESPName or State.ESPLines or State.ESPSkeleton
+
+	for _, plr in Players:GetPlayers() do
+		if plr ~= player then
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local head = char and char:FindFirstChild("Head")
+
+			if anyOn and hum and hum.Health > 0 and root and head then
+				local d = espData[plr]
+				if d and d.char ~= char then
+					destroyESP(plr)
+					d = nil
+				end
+				d = d or createESP(plr, char, root, head)
+
+				local color = ROLE_COLORS[getRole(plr)]
+
+				d.box.Enabled = State.ESPBox
+				d.stroke.Color = color
+
+				d.highlight.Enabled = State.ESPChams
+				d.highlight.FillColor = color
+				d.highlight.OutlineColor = color
+
+				local cam = Workspace.CurrentCamera
+				local drawn = false
+				if State.ESPLines and cam then
+					local pos, onScreen = cam:WorldToViewportPoint(root.Position)
+					if onScreen then
+						local vs = cam.ViewportSize
+						local from = Vector2.new(vs.X / 2, vs.Y)
+						local to = Vector2.new(pos.X, pos.Y)
+						local diff = to - from
+						d.line.Size = UDim2.fromOffset(diff.Magnitude, 1.5)
+						d.line.Position = UDim2.fromOffset((from.X + to.X) / 2, (from.Y + to.Y) / 2)
+						d.line.Rotation = math.deg(math.atan2(diff.Y, diff.X))
+						d.line.BackgroundColor3 = color
+						drawn = true
+					end
+				end
+				d.line.Visible = drawn
+
+				-- skeleton
+				local boneList = nil
+				if State.ESPSkeleton and cam then
+					boneList = char:FindFirstChild("UpperTorso") and BONES_R15 or BONES_R6
+				end
+				local count = boneList and #boneList or 0
+				for i = 1, math.max(count, d.boneMax) do
+					local f = d.bones[i]
+					local shown = false
+					if i <= count then
+						local a = char:FindFirstChild(boneList[i][1])
+						local b = char:FindFirstChild(boneList[i][2])
+						if a and b then
+							local pa = cam:WorldToViewportPoint(a.Position)
+							local pb = cam:WorldToViewportPoint(b.Position)
+							if pa.Z > 0 and pb.Z > 0 then
+								if not f then
+									f = new("Frame", {
+										AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0,
+										BackgroundColor3 = color, Visible = false,
+									}, espGui)
+									d.bones[i] = f
+									d.boneMax = math.max(d.boneMax, i)
+								end
+								drawLine(f, Vector2.new(pa.X, pa.Y), Vector2.new(pb.X, pb.Y), color, 1.5)
+								shown = true
+							end
+						end
+					end
+					if f then f.Visible = shown end
+				end
+
+				local lines = {}
+				if State.ESPName then
+					table.insert(lines, plr.DisplayName)
+				end
+				if State.ESPDistance and myRoot then
+					table.insert(lines, math.floor((myRoot.Position - root.Position).Magnitude) .. " studs")
+				end
+				d.text.Enabled = #lines > 0
+				d.label.Text = table.concat(lines, "\n")
+				d.label.TextColor3 = color
+			else
+				destroyESP(plr)
+			end
+		end
+	end
+end)
+
+Players.PlayerRemoving:Connect(destroyESP)
+
+--------------------------------------------------------------------
+-- Info bar: Red Hub Astral | FPS | Ping | Players
+--------------------------------------------------------------------
+local infoGui = new("ScreenGui", {
+	Name = "AstralInfo", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 8,
+}, playerGui)
+
+local infoBar = new("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 10),
+	Size = UDim2.fromOffset(0, 34), AutomaticSize = Enum.AutomaticSize.X,
+	BackgroundColor3 = BG, BackgroundTransparency = 0.1,
+}, infoGui)
+corner(infoBar, 17)
+addShimmer(new("UIStroke", {Thickness = 1.5, Color = WHITE}, infoBar), 50)
+new("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14)}, infoBar)
+new("UIListLayout", {
+	FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 9),
+	VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder,
+}, infoBar)
+
+local barOrder = 0
+local function nextOrder()
+	barOrder += 1
+	return barOrder
+end
+
+local function barText(text, bold)
+	return new("TextLabel", {
+		Size = UDim2.fromOffset(0, 34), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1, Text = text, TextColor3 = WHITE,
+		Font = bold and Enum.Font.GothamBlack or Enum.Font.GothamBold,
+		TextSize = bold and 13 or 14, LayoutOrder = nextOrder(),
+	}, infoBar)
+end
+
+local function barSep()
+	new("Frame", {
+		Size = UDim2.fromOffset(1, 16), BackgroundColor3 = Color3.fromRGB(70, 70, 76),
+		BorderSizePixel = 0, LayoutOrder = nextOrder(),
+	}, infoBar)
+end
+
+local function barDot()
+	local dot = new("Frame", {
+		Size = UDim2.fromOffset(8, 8), BackgroundColor3 = Color3.fromRGB(80, 220, 120),
+		BorderSizePixel = 0, LayoutOrder = nextOrder(),
+	}, infoBar)
+	corner(dot, 8)
+	return dot
+end
+
+barText("RED HUB ASTRAL", true)
+barSep()
+local fpsDot = barDot()
+local fpsLabel = barText("60 FPS")
+barSep()
+local pingDot = barDot()
+local pingLabel = barText("0 ms")
+barSep()
+local plrLabel = barText("0/0")
+
+local GOOD = Color3.fromRGB(80, 220, 120)
+local MID = Color3.fromRGB(255, 200, 70)
+local BAD = Color3.fromRGB(255, 80, 80)
+
+local function getPing()
+	local ok, v = pcall(function()
+		return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+	end)
+	if ok and v then return math.floor(v + 0.5) end
+	return math.floor(player:GetNetworkPing() * 2000)
+end
+
+local frames, lastTick = 0, os.clock()
+RunService.RenderStepped:Connect(function()
+	frames += 1
+	local now = os.clock()
+	if now - lastTick >= 0.5 then
+		local fps = math.floor(frames / (now - lastTick) + 0.5)
+		local ping = getPing()
+		fpsLabel.Text = fps .. " FPS"
+		pingLabel.Text = ping .. " ms"
+		plrLabel.Text = #Players:GetPlayers() .. "/" .. Players.MaxPlayers
+		fpsDot.BackgroundColor3 = fps >= 50 and GOOD or (fps >= 30 and MID or BAD)
+		pingDot.BackgroundColor3 = ping < 100 and GOOD or (ping < 200 and MID or BAD)
+		frames, lastTick = 0, now
+	end
+end)
+
+--------------------------------------------------------------------
+-- Visuals: Headless + Korblox (client-side only, R15)
+--------------------------------------------------------------------
+local KORBLOX_PARTS = {"RightUpperLeg", "RightLowerLeg", "RightFoot"}
+
+local function setHeadless(char, on)
+	local head = char:FindFirstChild("Head")
+	if not head then return end
+	head.Transparency = on and 1 or 0
+	local face = head:FindFirstChildOfClass("Decal")
+	if face then face.Transparency = on and 1 or 0 end
+end
+
+-- Korblox Deathspeaker look: thin dark bone-like right leg
+local function setKorblox(char, on)
+	for _, name in KORBLOX_PARTS do
+		local part = char:FindFirstChild(name)
+		if part and part:IsA("BasePart") then
+			local bone = part:FindFirstChild("AstralKorblox")
+			if on then
+				part.Transparency = 1
+				if not bone then
+					bone = Instance.new("Part")
+					bone.Name = "AstralKorblox"
+					bone.Color = Color3.fromRGB(28, 28, 32)
+					bone.Material = Enum.Material.SmoothPlastic
+					bone.CanCollide = false
+					bone.CanTouch = false
+					bone.CanQuery = false
+					bone.Massless = true
+					if name == "RightFoot" then
+						bone.Size = Vector3.new(0.3, 0.18, 0.8)
+						bone.CFrame = part.CFrame * CFrame.new(0, -0.05, -0.15)
+					else
+						bone.Shape = Enum.PartType.Cylinder
+						bone.Size = Vector3.new(part.Size.Y, 0.22, 0.22)
+						bone.CFrame = part.CFrame * CFrame.Angles(0, 0, math.rad(90))
+					end
+					bone.Parent = part
+					local w = Instance.new("WeldConstraint")
+					w.Part0 = part
+					w.Part1 = bone
+					w.Parent = bone
+				end
+			elseif bone then
+				bone:Destroy()
+				part.Transparency = 0
+			end
+		end
+	end
+end
+
+local wasHeadless, wasKorblox = false, false
+RunService.RenderStepped:Connect(function()
+	local char = player.Character
+	if not char then return end
+
+	if State.Headless then
+		setHeadless(char, true)
+	elseif wasHeadless then
+		setHeadless(char, false)
+	end
+	wasHeadless = State.Headless
+
+	if State.Korblox then
+		setKorblox(char, true)
+	elseif wasKorblox then
+		setKorblox(char, false)
+	end
+	wasKorblox = State.Korblox
+end)
+
+--------------------------------------------------------------------
+-- Visuals: camera FOV (30-120) + Stretch 4:3
+--------------------------------------------------------------------
+local wasFov = false
+RunService:BindToRenderStep("AstralCamera", Enum.RenderPriority.Camera.Value + 2, function()
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+
+	if State.CamFOVOn then
+		cam.FieldOfView = State.CamFOV
+	elseif wasFov then
+		cam.FieldOfView = 70
+	end
+	wasFov = State.CamFOVOn
+
+	if State.Stretch and not State.CamFrozen then
+		cam.CFrame = cam.CFrame * CFrame.new(0, 0, 0, 1, 0, 0, 0, 0.65, 0, 0, 0, 1)
+	end
+end)
+
+--------------------------------------------------------------------
+-- Noclip + Anti Fling
+--------------------------------------------------------------------
+RunService.Stepped:Connect(function()
+	local char = player.Character
+
+	if State.Noclip and char then
+		for _, o in char:GetDescendants() do
+			if o:IsA("BasePart") then o.CanCollide = false end
+		end
+	end
+
+	if State.AntiFling then
+		-- other players become non-solid: walk through them, they can't push or fling you
+		for _, plr in Players:GetPlayers() do
+			local oc = plr ~= player and plr.Character
+			if oc then
+				for _, o in oc:GetChildren() do
+					if o:IsA("BasePart") then o.CanCollide = false end
+				end
+			end
+		end
+		-- cancel abnormal velocity applied to you
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if root then
+			local limit = 250 + (State.SpeedOn and State.Speed or 0) + (State.JumpOn and State.Jump or 0)
+			if root.AssemblyLinearVelocity.Magnitude > limit or root.AssemblyAngularVelocity.Magnitude > 60 then
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+	end
+end)
+
+--------------------------------------------------------------------
+-- Drop Gun ESP (Workspace object named "GunDrop")
+--------------------------------------------------------------------
+local DROP_NAME = "GunDrop"
+local DROP_COLOR = Color3.fromRGB(255, 220, 60)
+local gunDrops, dropData = {}, {}
+
+local function trackDrop(inst)
+	if inst.Name == DROP_NAME then gunDrops[inst] = true end
+end
+for _, d in Workspace:GetDescendants() do trackDrop(d) end
+Workspace.DescendantAdded:Connect(trackDrop)
+
+local function clearDrop(inst)
+	local d = dropData[inst]
+	if d then
+		d.highlight:Destroy()
+		d.gui:Destroy()
+		dropData[inst] = nil
+	end
+end
+
+RunService.RenderStepped:Connect(function()
+	local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	for inst in gunDrops do
+		if not inst:IsDescendantOf(Workspace) then
+			clearDrop(inst)
+			gunDrops[inst] = nil
+		elseif State.ESPDropGun then
+			local d = dropData[inst]
+			if not d then
+				local adornee = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart", true)
+				if adornee then
+					local gui = new("BillboardGui", {
+						Adornee = adornee, AlwaysOnTop = true, Size = UDim2.fromOffset(160, 24),
+						StudsOffset = Vector3.new(0, 2, 0), ResetOnSpawn = false,
+					}, espGui)
+					local label = new("TextLabel", {
+						Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+						TextColor3 = DROP_COLOR, TextStrokeTransparency = 0,
+						Font = Enum.Font.GothamBold, TextSize = 13,
+					}, gui)
+					local hl = new("Highlight", {
+						Adornee = inst, FillColor = DROP_COLOR, OutlineColor = DROP_COLOR,
+						FillTransparency = 0.4, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+					}, inst)
+					d = {gui = gui, label = label, highlight = hl, part = adornee}
+					dropData[inst] = d
+				end
+			end
+			if d then
+				local dist = myRoot and math.floor((myRoot.Position - d.part.Position).Magnitude) or 0
+				d.label.Text = "Gun Drop [" .. dist .. "]"
+			end
+		else
+			clearDrop(inst)
+		end
+	end
+end)
+
+--------------------------------------------------------------------
+-- Custom sky: Night (black) / Gray
+--------------------------------------------------------------------
+local skyState = {orig = nil, hidden = {}, sky = nil, atmo = nil}
+
+applySky = function(mode)
+	if not skyState.orig then
+		skyState.orig = {ClockTime = Lighting.ClockTime}
+	end
+	if skyState.sky then skyState.sky:Destroy() skyState.sky = nil end
+	if skyState.atmo then skyState.atmo:Destroy() skyState.atmo = nil end
+	for _, o in skyState.hidden do o.Parent = Lighting end
+	table.clear(skyState.hidden)
+
+	if mode == "Off" then
+		Lighting.ClockTime = skyState.orig.ClockTime
+		return
+	end
+
+	for _, c in Lighting:GetChildren() do
+		if c:IsA("Sky") or c:IsA("Atmosphere") then
+			table.insert(skyState.hidden, c)
+			c.Parent = nil
+		end
+	end
+
+	local sky = Instance.new("Sky")
+	sky.Name = "AstralSky"
+	sky.SkyboxBk, sky.SkyboxDn, sky.SkyboxFt = "", "", ""
+	sky.SkyboxLf, sky.SkyboxRt, sky.SkyboxUp = "", "", ""
+	sky.StarCount = 0
+	sky.CelestialBodiesShown = false
+	sky.Parent = Lighting
+	skyState.sky = sky
+
+	if mode == "Night" then
+		Lighting.ClockTime = 0
+	else
+		Lighting.ClockTime = 14
+		local gray = Color3.fromRGB(140, 140, 140)
+		skyState.atmo = new("Atmosphere", {
+			Name = "AstralAtmosphere", Color = gray, Decay = gray,
+			Density = 0.3, Offset = 1, Glare = 0, Haze = 0,
+		}, Lighting)
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		if State.Sky ~= "Off" then
+			if not skyState.sky or skyState.sky.Parent ~= Lighting then
+				applySky(State.Sky)
+			end
+			Lighting.ClockTime = (State.Sky == "Night") and 0 or 14
+		end
+	end
+end)
+
+--------------------------------------------------------------------
+-- Troll: Invisibility (client-side)
+--------------------------------------------------------------------
+local invisOrig, wasInvis = {}, false
+
+RunService.RenderStepped:Connect(function()
+	local char = player.Character
+	if not char then return end
+
+	if State.Invisible then
+		for _, o in char:GetDescendants() do
+			if o:IsA("BasePart") or o:IsA("Decal") or o:IsA("Texture") then
+				if invisOrig[o] == nil then invisOrig[o] = o.Transparency end
+				o.Transparency = 1
+			end
+		end
+		wasInvis = true
+	elseif wasInvis then
+		for o, t in invisOrig do
+			if o.Parent then o.Transparency = t end
+		end
+		table.clear(invisOrig)
+		wasInvis = false
+	end
+end)
+
+--------------------------------------------------------------------
+-- Wallbang (reworked)
+-- While you hold the Gun, every wall on your aim line AND on the line
+-- from you to the target stops blocking raycasts (CanQuery off). The
+-- flags are reset and re-applied every frame, so only the walls that are
+-- really in the way are affected and nothing stays broken.
+-- Works when the gun's hit check (raycast / mouse hit) runs on the client.
+--------------------------------------------------------------------
+local wbDisabled = {}
+local wbParams = RaycastParams.new()
+wbParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function wbUnderFeet(part, feet)
+	local rel = part.CFrame:PointToObjectSpace(feet)
+	local h = part.Size / 2 + Vector3.new(0.6, 0.6, 0.6)
+	return math.abs(rel.X) <= h.X and math.abs(rel.Y) <= h.Y and math.abs(rel.Z) <= h.Z
+end
+
+-- disables blockers along the ray, returns where the ray ends
+local function wbPenetrate(origin, direction, char, feet)
+	local filter = {char}
+	local endPoint = origin + direction
+	for _ = 1, 14 do
+		wbParams.FilterDescendantsInstances = filter
+		local hit = Workspace:Raycast(origin, direction, wbParams)
+		if not hit then break end
+		local inst = hit.Instance
+		local model = inst:FindFirstAncestorOfClass("Model")
+		if model and model:FindFirstChildOfClass("Humanoid") then
+			endPoint = hit.Position
+			break
+		end
+		if wbUnderFeet(inst, feet) then
+			table.insert(filter, inst) -- never remove the floor under you
+		else
+			inst.CanQuery = false
+			wbDisabled[inst] = true
+		end
+	end
+	return endPoint
+end
+
+setWallbang = function(on)
+	if not on then
+		for part in wbDisabled do
+			if part.Parent then part.CanQuery = true end
+		end
+		table.clear(wbDisabled)
+	end
+end
+
+RunService.RenderStepped:Connect(function()
+	-- undo last frame
+	for part in wbDisabled do
+		if part.Parent then part.CanQuery = true end
+	end
+	table.clear(wbDisabled)
+
+	if not State.Wallbang then return end
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local cam = Workspace.CurrentCamera
+	if not (root and hum and cam and hum.Health > 0) then return end
+	if not char:FindFirstChild(GUN_NAME) then return end -- Gun must be equipped
+
+	local feet = root.Position - Vector3.new(0, hum.HipHeight + root.Size.Y / 2 + 0.5, 0)
+
+	local vp
+	if UIS.MouseEnabled and UIS.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+		vp = UIS:GetMouseLocation()
+	else
+		vp = cam.ViewportSize / 2
+	end
+	local ray = cam:ViewportPointToRay(vp.X, vp.Y)
+
+	-- 1) camera / mouse ray (what the gun script aims at)
+	local endPoint = wbPenetrate(ray.Origin, ray.Direction * 1000, char, feet)
+
+	-- 2) the shot itself: from you to that point
+	local toTarget = endPoint - root.Position
+	if toTarget.Magnitude > 1 then
+		wbPenetrate(root.Position, toTarget, char, feet)
+	end
+end)
+
+--------------------------------------------------------------------
+-- Float + Inf Jump
+--------------------------------------------------------------------
+local floatRay = RaycastParams.new()
+floatRay.FilterType = Enum.RaycastFilterType.Exclude
+local floatLV, floatAtt, lastGround = nil, nil, nil
+
+local function clearFloat()
+	if floatLV then floatLV:Destroy() floatLV = nil end
+	if floatAtt then floatAtt:Destroy() floatAtt = nil end
+	lastGround = nil
+end
+
+RunService.Heartbeat:Connect(function()
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not (root and hum) then
+		clearFloat()
+		return
+	end
+
+	if not State.Float then
+		if floatLV then clearFloat() end
+		return
+	end
+
+	-- (re)create the vertical-only velocity constraint
+	if not floatLV or floatLV.Parent ~= root then
+		clearFloat()
+		floatAtt = Instance.new("Attachment")
+		floatAtt.Name = "AstralFloatAtt"
+		floatAtt.Parent = root
+		floatLV = Instance.new("LinearVelocity")
+		floatLV.Name = "AstralFloat"
+		floatLV.Attachment0 = floatAtt
+		floatLV.RelativeTo = Enum.ActuatorRelativeTo.World
+		floatLV.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+		floatLV.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+		floatLV.MaxAxesForce = Vector3.new(0, 1e7, 0)
+		floatLV.VectorVelocity = Vector3.zero
+		floatLV.Parent = root
+	end
+
+	floatRay.FilterDescendantsInstances = {char}
+	local hit = Workspace:Raycast(root.Position, Vector3.new(0, -500, 0), floatRay)
+	if hit then lastGround = hit.Position.Y end
+	if not lastGround then lastGround = root.Position.Y - hum.HipHeight - root.Size.Y / 2 end
+
+	local target = lastGround + hum.HipHeight + root.Size.Y / 2 + State.FloatHeight
+	local vy = math.clamp((target - root.Position.Y) * 10, -50, 50)
+	floatLV.VectorVelocity = Vector3.new(0, vy, 0)
+end)
+
+UIS.JumpRequest:Connect(function()
+	if not State.InfJump then return end
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+
+--------------------------------------------------------------------
+-- Pick Up Gun: your hitbox (root) jumps to the dropped gun for a split
+-- second and comes back. The camera stays frozen so you don't see it.
+-- Does nothing if you already hold a Gun/Knife or no gun is on the map.
+--------------------------------------------------------------------
+task.spawn(function()
+	while true do
+		task.wait(0.2)
+		if State.AutoGun then
+			local char = player.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if root and hum and hum.Health > 0 and getRole(player) == "Innocent" then
+				local drop, dropPart
+				for inst in gunDrops do
+					if inst:IsDescendantOf(Workspace) then
+						local part = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart", true)
+						if part then
+							drop, dropPart = inst, part
+							break
+						end
+					end
+				end
+
+				if drop then
+					local cam = Workspace.CurrentCamera
+					local back = root.CFrame
+					local camCF, camType = cam.CFrame, cam.CameraType
+					State.CamFrozen = true
+					cam.CameraType = Enum.CameraType.Scriptable
+					cam.CFrame = camCF
+
+					pcall(function()
+						local t0 = os.clock()
+						while os.clock() - t0 < 0.4
+							and State.AutoGun
+							and root.Parent
+							and drop:IsDescendantOf(Workspace)
+							and getRole(player) == "Innocent" do
+							root.CFrame = CFrame.new(dropPart.Position + Vector3.new(0, 1.5, 0))
+							root.AssemblyLinearVelocity = Vector3.zero
+							RunService.Heartbeat:Wait()
+						end
+					end)
+
+					if root.Parent then
+						root.CFrame = back
+						root.AssemblyLinearVelocity = Vector3.zero
+					end
+					cam.CameraType = camType
+					State.CamFrozen = false
+					task.wait(0.5)
+				end
+			end
+		end
+	end
+end)
+
+--------------------------------------------------------------------
+-- Fullbright: dark places become bright
+--------------------------------------------------------------------
+local fbOrig = nil
+RunService.RenderStepped:Connect(function()
+	if State.Fullbright then
+		if not fbOrig then
+			fbOrig = {
+				Brightness = Lighting.Brightness,
+				Ambient = Lighting.Ambient,
+				OutdoorAmbient = Lighting.OutdoorAmbient,
+				GlobalShadows = Lighting.GlobalShadows,
+				FogEnd = Lighting.FogEnd,
+				ExposureCompensation = Lighting.ExposureCompensation,
+			}
+		end
+		Lighting.Brightness = 2
+		Lighting.Ambient = Color3.fromRGB(190, 190, 190)
+		Lighting.OutdoorAmbient = Color3.fromRGB(190, 190, 190)
+		Lighting.GlobalShadows = false
+		Lighting.FogEnd = 1e6
+		Lighting.ExposureCompensation = 0
+	elseif fbOrig then
+		for k, v in fbOrig do
+			Lighting[k] = v
+		end
+		fbOrig = nil
+	end
+end)
+
+--------------------------------------------------------------------
+-- Tabs and functions (same list for both menus)
+--------------------------------------------------------------------
+local function buildTabs(UI)
+	local createTab, addSection = UI.createTab, UI.addSection
+	local addToggle, addSlider, addCycle = UI.addToggle, UI.addSlider, UI.addCycle
+
+	local lp = createTab("Movement", "solar/running-bold")
+	addSection(lp, "Speed")
+	addToggle(lp, "Speed", K("SpeedOn"), function(v) State.SpeedOn = v end)
+	addSlider(lp, "Speed value", 1, 1000, K("Speed"), function(v) State.Speed = v end)
+	addSection(lp, "Jump")
+	addToggle(lp, "Jump", K("JumpOn"), function(v) State.JumpOn = v end)
+	addSlider(lp, "Jump value", 1, 1000, K("Jump"), function(v) State.Jump = v end)
+	addSection(lp, "Spin")
+	addToggle(lp, "Spin", K("SpinOn"), function(v) State.SpinOn = v end)
+	addSlider(lp, "Spin speed", 1, 300, K("Spin"), function(v) State.Spin = v end)
+	addSection(lp, "Collision")
+	addToggle(lp, "Noclip", K("Noclip"), function(v) State.Noclip = v end)
+	addSection(lp, "Air")
+	addToggle(lp, "Float", K("Float"), function(v) State.Float = v end)
+	addSlider(lp, "Float height", 1, 30, K("FloatHeight"), function(v) State.FloatHeight = v end)
+	addToggle(lp, "Inf Jump", K("InfJump"), function(v) State.InfJump = v end)
+
+	local combat = createTab("Combat", "solar/cursor-bold")
+	addSection(combat, "Aim")
+	addToggle(combat, "Aim Bot", K("Aimbot"), function(v) State.Aimbot = v end)
+	addToggle(combat, "Fixation Aim Murder", K("LockMurderer"), function(v) State.LockMurderer = v end)
+	addCycle(combat, "Aim Part", {"Head", "Torso", "Legs"}, K("AimPart"), function(v) State.AimPart = v end)
+	addSlider(combat, "Aim Smoothing", 1, 100, K("Smoothing"), function(v) State.Smoothing = v end)
+	addSlider(combat, "FOV", 10, 500, K("FOV"), function(v) State.FOV = v end)
+	addToggle(combat, "FOV Circle", K("FOVCircle"), function(v) State.FOVCircle = v end)
+	addToggle(combat, "Wall Check", K("WallCheck"), function(v) State.WallCheck = v end)
+	addSection(combat, "Gun")
+	addToggle(combat, "Pick Up Gun", K("AutoGun"), function(v) State.AutoGun = v end)
+	addToggle(combat, "Wallbang", K("Wallbang"), function(v)
+		State.Wallbang = v
+		setWallbang(v)
+	end)
+
+	local visuals = createTab("Visuals", "solar/eye-bold")
+	addSection(visuals, "ESP")
+	addToggle(visuals, "ESP Box", K("ESPBox"), function(v) State.ESPBox = v end)
+	addToggle(visuals, "ESP Chams", K("ESPChams"), function(v) State.ESPChams = v end)
+	addToggle(visuals, "ESP Distance", K("ESPDistance"), function(v) State.ESPDistance = v end)
+	addToggle(visuals, "ESP Name", K("ESPName"), function(v) State.ESPName = v end)
+	addToggle(visuals, "ESP Lines", K("ESPLines"), function(v) State.ESPLines = v end)
+	addToggle(visuals, "ESP Skeleton", K("ESPSkeleton"), function(v) State.ESPSkeleton = v end)
+	addToggle(visuals, "Drop Gun ESP", K("ESPDropGun"), function(v) State.ESPDropGun = v end)
+	addSection(visuals, "Role colors")
+	UI.addRoleColors(visuals)
+	addSection(visuals, "Character (local)")
+	addToggle(visuals, "Headless", K("Headless"), function(v) State.Headless = v end)
+	addToggle(visuals, "Korblox (right leg)", K("Korblox"), function(v) State.Korblox = v end)
+	addSection(visuals, "Sky")
+	addCycle(visuals, "Custom Sky", {"Off", "Night", "Gray"}, K("Sky"), function(v)
+		State.Sky = v
+		applySky(v)
+	end)
+	addSection(visuals, "Lighting")
+	addToggle(visuals, "Fullbright", K("Fullbright"), function(v) State.Fullbright = v end)
+	addSection(visuals, "Camera")
+	addToggle(visuals, "Stretch 4:3", K("Stretch"), function(v) State.Stretch = v end)
+	addToggle(visuals, "Custom FOV", K("CamFOVOn"), function(v) State.CamFOVOn = v end)
+	addSlider(visuals, "FOV value", 30, 120, K("CamFOV"), function(v) State.CamFOV = v end)
+
+	local defense = createTab("Defense", "solar/layers-bold")
+	addSection(defense, "Protection")
+	addToggle(defense, "Anti Fling", K("AntiFling"), function(v) State.AntiFling = v end)
+
+	local troll = createTab("Troll", "solar/stars-bold")
+	addSection(troll, "Troll")
+	addToggle(troll, "Invisibility", K("Invisible"), function(v) State.Invisible = v end)
+end
+
+--------------------------------------------------------------------
+-- Menu 1: FluentPro UI (needs loadstring + HttpGet)
+--------------------------------------------------------------------
+local FLUENT_URL = "https://github.com/StyearX/Fluent-Modded/releases/download/Fluent/FluentPro"
+
+local function startFluentUI()
+	local okLoad, Fluent = pcall(function()
+		return loadstring(game:HttpGet(FLUENT_URL))()
+	end)
+	if not okLoad or not Fluent then
+		warn("[Red Hub Astral] FluentPro not available (" .. tostring(Fluent) .. ") - using the built-in menu")
+		return false
+	end
+
+	local ok, err = pcall(function()
+		-- Custom themes (from the GUI file)
+		Fluent:RegisterCustomTheme("NeonBlue", {
+		        Accent = Color3.fromRGB(0, 180, 255),
+		        AcrylicMain = Color3.fromRGB(10, 14, 28),
+		        AcrylicBorder = Color3.fromRGB(0, 100, 180),
+		        AcrylicGradient = ColorSequence.new(Color3.fromRGB(10, 14, 28), Color3.fromRGB(5, 8, 20)),
+		        AcrylicNoise = 0.75,
+		        TitleBarLine = Color3.fromRGB(0, 100, 180),
+		        Tab = Color3.fromRGB(15, 22, 48),
+		        Element = Color3.fromRGB(12, 18, 40),
+		        ElementBorder = Color3.fromRGB(0, 80, 160),
+		        InElementBorder = Color3.fromRGB(0, 120, 220),
+		        ElementTransparency = 0.82,
+		        ToggleSlider = Color3.fromRGB(20, 30, 70),
+		        ToggleToggled = Color3.fromRGB(0, 180, 255),
+		        SliderRail = Color3.fromRGB(20, 30, 70),
+		        DropdownFrame = Color3.fromRGB(10, 16, 36),
+		        DropdownHolder = Color3.fromRGB(6, 10, 24),
+		        DropdownBorder = Color3.fromRGB(0, 80, 160),
+		        DropdownOption = Color3.fromRGB(14, 22, 50),
+		        Keybind = Color3.fromRGB(14, 22, 50),
+		        Input = Color3.fromRGB(8, 14, 32),
+		        InputFocused = Color3.fromRGB(4, 8, 20),
+		        InputIndicator = Color3.fromRGB(0, 120, 220),
+		        Dialog = Color3.fromRGB(6, 10, 24),
+		        DialogHolder = Color3.fromRGB(4, 8, 20),
+		        DialogHolderLine = Color3.fromRGB(0, 70, 140),
+		        DialogButton = Color3.fromRGB(10, 16, 38),
+		        DialogButtonBorder = Color3.fromRGB(0, 80, 160),
+		        DialogBorder = Color3.fromRGB(0, 80, 160),
+		        DialogInput = Color3.fromRGB(8, 14, 32),
+		        DialogInputLine = Color3.fromRGB(0, 120, 220),
+		        Text = Color3.fromRGB(230, 245, 255),
+		        SubText = Color3.fromRGB(120, 170, 220),
+		        Hover = Color3.fromRGB(20, 36, 80),
+		        HoverChange = 0.05,
+		        ShineEnabled = true,
+		        StrokeShine = true,
+		        StrokeDark = Color3.fromRGB(0, 60, 130),
+		        Shine = {
+		                Speed = 0.5,
+		                RotationSpeed = 18,
+		                ColorSequence = ColorSequence.new({
+		                        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 80, 160)),
+		                        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 180, 255)),
+		                        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 80, 160)),
+		                }),
+		        },
+		        ButtonGradient = {
+		                Background = ColorSequence.new({
+		                        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 30, 80)),
+		                        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 10, 40)),
+		                }),
+		                Stroke = ColorSequence.new({
+		                        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 120, 220)),
+		                        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 180, 255)),
+		                        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 120, 220)),
+		                }),
+		        },
+		})
+
+		Fluent:RegisterCustomTheme("EmeraldDark", {
+		        Accent = Color3.fromRGB(0, 220, 120),
+		        AcrylicMain = Color3.fromRGB(8, 20, 14),
+		        AcrylicBorder = Color3.fromRGB(0, 140, 70),
+		        AcrylicGradient = ColorSequence.new(Color3.fromRGB(8, 20, 14), Color3.fromRGB(4, 12, 8)),
+		        AcrylicNoise = 0.7,
+		        TitleBarLine = Color3.fromRGB(0, 140, 70),
+		        Tab = Color3.fromRGB(10, 28, 18),
+		        Element = Color3.fromRGB(8, 22, 14),
+		        ElementBorder = Color3.fromRGB(0, 110, 55),
+		        InElementBorder = Color3.fromRGB(0, 180, 90),
+		        ElementTransparency = 0.84,
+		        ToggleSlider = Color3.fromRGB(14, 40, 24),
+		        ToggleToggled = Color3.fromRGB(0, 220, 120),
+		        SliderRail = Color3.fromRGB(14, 40, 24),
+		        DropdownFrame = Color3.fromRGB(6, 18, 12),
+		        DropdownHolder = Color3.fromRGB(4, 12, 8),
+		        DropdownBorder = Color3.fromRGB(0, 110, 55),
+		        DropdownOption = Color3.fromRGB(10, 28, 18),
+		        Keybind = Color3.fromRGB(10, 28, 18),
+		        Input = Color3.fromRGB(6, 18, 12),
+		        InputFocused = Color3.fromRGB(3, 10, 7),
+		        InputIndicator = Color3.fromRGB(0, 170, 85),
+		        Dialog = Color3.fromRGB(4, 14, 9),
+		        DialogHolder = Color3.fromRGB(3, 10, 6),
+		        DialogHolderLine = Color3.fromRGB(0, 90, 45),
+		        DialogButton = Color3.fromRGB(8, 20, 13),
+		        DialogButtonBorder = Color3.fromRGB(0, 110, 55),
+		        DialogBorder = Color3.fromRGB(0, 110, 55),
+		        DialogInput = Color3.fromRGB(6, 18, 12),
+		        DialogInputLine = Color3.fromRGB(0, 170, 85),
+		        Text = Color3.fromRGB(220, 255, 235),
+		        SubText = Color3.fromRGB(120, 200, 155),
+		        Hover = Color3.fromRGB(14, 42, 26),
+		        HoverChange = 0.05,
+		        ShineEnabled = true,
+		        StrokeShine = false,
+		        StrokeDark = Color3.fromRGB(0, 80, 40),
+		        ButtonGradient = {
+		                Background = ColorSequence.new({
+		                        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 50, 25)),
+		                        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 20, 10)),
+		                }),
+		                Stroke = ColorSequence.new({
+		                        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 150, 75)),
+		                        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 220, 120)),
+		                        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 150, 75)),
+		                }),
+		        },
+		})
+
+
+		local cam0 = Workspace.CurrentCamera
+		local vs0 = cam0 and cam0.ViewportSize or Vector2.new(800, 600)
+		local winW = math.clamp(vs0.X - 40, 300, 520)
+		local winH = math.clamp(vs0.Y - 40, 260, 440)
+
+		local Window = Fluent:CreateWindow({
+			Title            = "Red Hub Astral",
+			SubTitle         = "by owner @cww_5 | @zoxamo",
+			TabWidth         = 130,
+			Size             = UDim2.fromOffset(winW, winH),
+			Acrylic          = true,
+			Theme            = "AMOLED",
+			MinimizeKey      = Enum.KeyCode.RightShift,
+			Search           = true,
+			UserInfoTop      = true,
+			UserInfoTitle    = "by owner @cww_5",
+			UserInfoSubtitle = "@zoxamo",
+			UserInfoColor    = Color3.fromRGB(255, 255, 255),
+		})
+
+		Fluent:SetErrorHandler(function(msg)
+			pcall(function()
+				Fluent:Notify({Title = "Error", Content = tostring(msg), Type = "Error", Duration = 5})
+			end)
+		end)
+
+		-- Adapters: shared tab list -> Fluent elements
+		local optCounter = 0
+		local bindings = {}
+		local function takeId()
+			local id = pendingKey
+			pendingKey = nil
+			if not id then
+				optCounter += 1
+				id = "Opt" .. optCounter
+			end
+			return id
+		end
+		local function bind(id, callback)
+			if State[id] ~= nil then
+				table.insert(bindings, {id = id, callback = callback})
+			end
+		end
+		local function safe(kind, text, fn)
+			local ok, err = pcall(fn)
+			if not ok then
+				warn("[Red Hub Astral] " .. kind .. " '" .. text .. "' failed: " .. tostring(err))
+			end
+		end
+
+		local UI = {}
+		function UI.createTab(name, icon)
+			return {tab = Window:AddTab({Title = name, Icon = icon}), name = name}
+		end
+		local function curSection(w)
+			if not w.section then w.section = w.tab:AddSection(w.name) end
+			return w.section
+		end
+		function UI.addSection(w, text)
+			w.section = w.tab:AddSection(text)
+		end
+		function UI.addToggle(w, text, default, callback, desc)
+			local id = takeId()
+			bind(id, callback)
+			safe("toggle", text, function()
+				curSection(w):AddToggle(id, {Title = text, Default = default, Description = desc, Callback = callback})
+			end)
+		end
+		function UI.addSlider(w, text, min, max, default, callback, desc)
+			local id = takeId()
+			bind(id, callback)
+			safe("slider", text, function()
+				curSection(w):AddSlider(id, {
+					Title = text, Min = min, Max = max, Default = default, Rounding = 0,
+					Description = desc, Callback = callback,
+				})
+			end)
+		end
+		function UI.addCycle(w, text, options, default, callback, desc)
+			local id = takeId()
+			bind(id, callback)
+			safe("dropdown", text, function()
+				curSection(w):AddDropdown(id, {
+					Title = text, Values = options, Default = default, Description = desc, Callback = callback,
+				})
+			end)
+		end
+		local function addColor(w, text, id, default, callback)
+			safe("colorpicker", text, function()
+				curSection(w):AddColorpicker(id, {
+					Title = text, Default = default, Transparency = 0, Callback = callback,
+				})
+			end)
+		end
+		function UI.addRoleColors(w)
+			addColor(w, "Murderer", "ColMurderer", ROLE_COLORS.Murderer, function(c) ROLE_COLORS.Murderer = c end)
+			addColor(w, "Sheriff", "ColSheriff", ROLE_COLORS.Sheriff, function(c) ROLE_COLORS.Sheriff = c end)
+			addColor(w, "Innocent", "ColInnocent", ROLE_COLORS.Innocent, function(c) ROLE_COLORS.Innocent = c end)
+		end
+
+		-- Round menu button: neon R (or your image), draggable, tap = show/hide
+		local gui = new("ScreenGui", {
+			Name = "RedHubAstralButton", ResetOnSpawn = false, DisplayOrder = 100,
+			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		}, playerGui)
+
+		local uiOpen = true
+		local function toggleWindow()
+			uiOpen = not uiOpen
+			if uiOpen then Window:Show() else Window:Hide() end
+		end
+
+		local MENU_SIZE = 62
+		local menuBtn = new("TextButton", {
+			Size = UDim2.fromOffset(MENU_SIZE, MENU_SIZE), Position = UDim2.new(0, 12, 0.5, -MENU_SIZE / 2),
+			BackgroundColor3 = BG, Text = "", AutoButtonColor = false,
+		}, gui)
+		corner(menuBtn, MENU_SIZE)
+		local ring = new("UIStroke", {
+			Thickness = 2.5, Color = WHITE, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		}, menuBtn)
+		addShimmer(ring, 120)
+
+		local glowTarget
+		if LOGO_IMAGE ~= "" then
+			local img = new("ImageLabel", {
+				Size = UDim2.new(1, -8, 1, -8), Position = UDim2.fromOffset(4, 4),
+				BackgroundTransparency = 1, Image = LOGO_IMAGE, ScaleType = Enum.ScaleType.Fit,
+			}, menuBtn)
+			corner(img, MENU_SIZE)
+			glowTarget = ring
+		else
+			local rLabel = new("TextLabel", {
+				Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "R",
+				TextColor3 = NEON, Font = Enum.Font.Fantasy, TextSize = 46,
+			}, menuBtn)
+			glowTarget = new("UIStroke", {Thickness = 3, Color = NEON, Transparency = 0.5}, rLabel)
+		end
+		TweenService:Create(
+			glowTarget,
+			TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+			{Transparency = 0.9}
+		):Play()
+		TweenService:Create(
+			ring,
+			TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+			{Thickness = 4}
+		):Play()
+
+		do
+			local pressing, moved, startPos, btnStart = false, false, nil, nil
+			menuBtn.InputBegan:Connect(function(i)
+				if isPointer(i) then
+					pressing, moved = true, false
+					startPos = i.Position
+					btnStart = menuBtn.Position
+				end
+			end)
+			UIS.InputChanged:Connect(function(i)
+				if pressing and isMove(i) then
+					local d = i.Position - startPos
+					if d.Magnitude > 8 then moved = true end
+					if moved then
+						menuBtn.Position = UDim2.new(
+							btnStart.X.Scale, btnStart.X.Offset + d.X,
+							btnStart.Y.Scale, btnStart.Y.Offset + d.Y
+						)
+					end
+				end
+			end)
+			UIS.InputEnded:Connect(function(i)
+				if pressing and isPointer(i) then
+					pressing = false
+					if not moved then toggleWindow() end
+				end
+			end)
+		end
+
+		-- Cheat tabs
+		buildTabs(UI)
+
+		-- FluentPro showcase (copied from the GUI file). Delete this pcall block if you don't need it.
+		local okShow, errShow = pcall(function()
+			local LocalPlayer = player
+			local UserInputService = UIS
+
+			local function CreateButton(ButtonName, Name, Size1, Size2, ScriptLogic, CircleMode)
+			        local screenGui = Instance.new("ScreenGui")
+			        screenGui.Name = ButtonName
+			        screenGui.Parent = LocalPlayer.PlayerGui
+			        screenGui.ResetOnSpawn = false
+			        screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+			        local frame = Instance.new("Frame")
+			        frame.Name = ButtonName
+			        frame.Size = UDim2.new(Size1, 0, Size2, 0)
+			        frame.Position = UDim2.new(0.5 - Size1 / 2, 0, 0.5 - Size2 / 2, 0)
+			        frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+			        frame.BackgroundTransparency = 0.5
+			        frame.Parent = screenGui
+
+			        local frameCorner = Instance.new("UICorner")
+			        frameCorner.CornerRadius = UDim.new(0, 4)
+			        frameCorner.Parent = frame
+
+			        local stroke = Instance.new("UIStroke")
+			        stroke.Thickness = 3
+			        stroke.Transparency = 0.8
+			        stroke.Color = Color3.fromRGB(255, 255, 255)
+			        stroke.Parent = frame
+
+			        local innerFrame = Instance.new("Frame")
+			        innerFrame.Size = UDim2.new(1, 6, 1, 6)
+			        innerFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+			        innerFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+			        innerFrame.BackgroundTransparency = 1
+			        innerFrame.Parent = frame
+
+			        local innerFrameCorner = Instance.new("UICorner")
+			        innerFrameCorner.CornerRadius = UDim.new(0, 4)
+			        innerFrameCorner.Parent = innerFrame
+
+			        local innerStroke = Instance.new("UIStroke")
+			        innerStroke.Thickness = 2
+			        innerStroke.Transparency = 0.6
+			        innerStroke.Color = Color3.fromRGB(0, 0, 0)
+			        innerStroke.Parent = innerFrame
+
+			        local button = Instance.new("TextButton")
+			        button.Size = UDim2.new(0.8, 0, 0.8, 0)
+			        button.Position = UDim2.new(0.5, 0, 0.5, 0)
+			        button.AnchorPoint = Vector2.new(0.5, 0.5)
+			        button.BackgroundTransparency = 1
+			        button.Text = Name
+			        button.TextColor3 = Color3.fromRGB(255, 255, 255)
+			        button.TextTransparency = 0.7
+			        button.TextScaled = true
+			        button.Font = Enum.Font.GothamBold
+			        button.Parent = frame
+
+			        local toggle = Instance.new("TextButton")
+			        toggle.Size = UDim2.new(0, 28, 0, 28)
+			        toggle.Position = UDim2.new(1, 6, 0.5, -14)
+			        toggle.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+			        toggle.Text = "○"
+			        toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+			        toggle.Visible = false
+			        toggle.Parent = frame
+			        Instance.new("UICorner", toggle).CornerRadius = UDim.new(1, 0)
+
+			        local originalSize = UDim2.new(Size1, 0, Size2, 0)
+			        local holding, holdStart, hideAt = false, 0, 0
+
+			        frame:SetAttribute("IsCircle", false)
+			        local isCircle = CircleMode ~= nil and CircleMode or frame:GetAttribute("IsCircle")
+
+			        local function applyShape(circle)
+			                frame:SetAttribute("IsCircle", circle)
+			                if circle then
+			                        local s = math.min(frame.AbsoluteSize.X, frame.AbsoluteSize.Y)
+			                        frame.Size = UDim2.new(0, s, 0, s)
+			                        button.TextWrapped = true
+			                        button.TextScaled = true
+			                        button.TextSize = math.floor(s * 0.45)
+			                        frameCorner.CornerRadius = UDim.new(1, 0)
+			                        innerFrameCorner.CornerRadius = UDim.new(1, 0)
+			                        toggle.Text = "▢"
+			                else
+			                        frame.Size = originalSize
+			                        button.TextWrapped = false
+			                        button.TextScaled = true
+			                        button.TextSize = 14
+			                        frameCorner.CornerRadius = UDim.new(0, 4)
+			                        innerFrameCorner.CornerRadius = UDim.new(0, 4)
+			                        toggle.Text = "○"
+			                end
+			        end
+
+			        applyShape(isCircle)
+
+			        task.spawn(function()
+			                while task.wait(0.25) do
+			                        if not frame.Parent then break end
+			                        if toggle.Visible and tick() - hideAt >= 10 then toggle.Visible = false end
+			                end
+			        end)
+
+			        button.InputBegan:Connect(function(i)
+			                if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			                        holding = true
+			                        holdStart = tick()
+			                end
+			        end)
+
+			        button.InputEnded:Connect(function(i)
+			                if holding and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+			                        holding = false
+			                        if tick() - holdStart >= 0.6 then
+			                                toggle.Visible = true
+			                                hideAt = tick()
+			                        end
+			                end
+			        end)
+
+			        toggle.MouseButton1Click:Connect(function()
+			                hideAt = tick()
+			                applyShape(not frame:GetAttribute("IsCircle"))
+			        end)
+
+			        if ScriptLogic then
+			                button.Activated:Connect(function()
+			                        ScriptLogic(button)
+			                end)
+			        end
+
+			        local function MakeDraggable(topbar, obj)
+			                local dragging = false
+			                local dragInput = nil
+			                local dragStart = nil
+			                local startPos = nil
+			                local holdTime = 2
+			                local holdToken = 0
+			                local holding2 = false
+
+			                topbar.InputBegan:Connect(function(input)
+			                        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			                                dragging = true
+			                                dragStart = input.Position
+			                                startPos = obj.Position
+			                                holding2 = true
+			                                holdToken = holdToken + 1
+			                                local token = holdToken
+			                                task.delay(holdTime, function()
+			                                        if holding2 and token == holdToken then
+			                                                obj:SetAttribute("Locked", not obj:GetAttribute("Locked"))
+			                                                holding2 = false
+			                                        end
+			                                end)
+			                                input.Changed:Connect(function()
+			                                        if input.UserInputState == Enum.UserInputState.End then
+			                                                dragging = false
+			                                                holding2 = false
+			                                        end
+			                                end)
+			                        end
+			                end)
+
+			                topbar.InputChanged:Connect(function(input)
+			                        if not dragStart then return end
+			                        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			                                dragInput = input
+			                        end
+			                end)
+
+			                UserInputService.InputChanged:Connect(function(input)
+			                        if input == dragInput and dragging and not obj:GetAttribute("Locked") then
+			                                local delta = input.Position - dragStart
+			                                obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+			                        end
+			                end)
+			        end
+
+			        MakeDraggable(button, frame)
+
+			        return frame, button, applyShape
+			end
+
+			local floatingGui = nil
+			local floatingBtn = nil
+
+
+			local TabElements = Window:AddTab({ Title = "UI Elements", Icon = "solar/layers-bold" })
+
+			local secToggles = TabElements:AddSection("Toggle")
+			secToggles:AddToggle("ShowcaseToggle1", {
+			        Title = "Speed Boost",
+			        Icon = "solar/running-bold",
+			        Default = false,
+			        Description = "Enables walk speed multiplier when ON.",
+			        Callback = function(v)
+			                local chr = LocalPlayer.Character
+			                if chr and chr:FindFirstChild("Humanoid") then chr.Humanoid.WalkSpeed = v and 60 or 16 end
+			                Fluent:Notify({ Title = "Speed Boost", Content = v and "Enabled" or "Disabled", Type = v and "Success" or "Info", Duration = 2 })
+			        end,
+			})
+			secToggles:AddToggle("ShowcaseToggle2", {
+			        Title = "High Jump",
+			        Icon = "solar/arrow-up-bold",
+			        Default = false,
+			        Description = "Increases jump power when ON.",
+			        Callback = function(v)
+			                local chr = LocalPlayer.Character
+			                if chr and chr:FindFirstChild("Humanoid") then chr.Humanoid.JumpPower = v and 120 or 50 end
+			                Fluent:Notify({ Title = "High Jump", Content = v and "Enabled" or "Disabled", Type = v and "Success" or "Info", Duration = 2 })
+			        end,
+			})
+			secToggles:AddDivider()
+
+			local secSliders = TabElements:AddSection("Slider")
+			secSliders:AddSlider("ShowcaseSlider1", {
+			        Title = "Walk Speed",
+			        Icon = "solar/running-bold",
+			        Min = 1,
+			        Max = 200,
+			        Default = 16,
+			        Rounding = 0,
+			        Description = "Sets humanoid WalkSpeed in real time.",
+			        Callback = function(v)
+			                local chr = LocalPlayer.Character
+			                if chr and chr:FindFirstChild("Humanoid") then chr.Humanoid.WalkSpeed = v end
+			        end,
+			})
+			secSliders:AddSlider("ShowcaseSlider2", {
+			        Title = "Volume",
+			        Icon = "solar/volume-loud-bold",
+			        Min = 0,
+			        Max = 10,
+			        Default = 5,
+			        Rounding = 1,
+			        Description = "Decimal slider — Rounding=1 gives one decimal place.",
+			        Callback = function(v)
+			                Fluent:Notify({ Title = "Volume", Content = tostring(v / 10), Duration = 1 })
+			        end,
+			})
+			secSliders:AddDivider()
+
+			local secButtons = TabElements:AddSection("Button")
+			secButtons:AddButton({
+			        Title = "Reset Character",
+			        Icon = "solar/restart-bold",
+			        Description = "Destroys HumanoidRootPart to respawn the character.",
+			        Callback = function()
+			                if LocalPlayer.Character then
+			                        local hr = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+			                        if hr then hr:Destroy() end
+			                end
+			                Fluent:Notify({ Title = "Reset", Content = "Character reset.", Type = "Warning", Duration = 3 })
+			        end,
+			})
+			secButtons:AddButton({
+			        Title = "Fire Notify",
+			        Icon = "solar/bell-bold",
+			        Description = "Demonstrates a Success notification.",
+			        Callback = function()
+			                Fluent:Notify({ Title = "Hello!", Content = "Button was pressed.", Type = "Success", Duration = 3 })
+			        end,
+			})
+			secButtons:AddDivider()
+
+			local secInputs = TabElements:AddSection("Input")
+			secInputs:AddInput("ShowcaseInput1", {
+			        Title = "Display Name",
+			        Icon = "solar/user-bold",
+			        Placeholder = "Enter a name…",
+			        Default = "",
+			        Description = "Text is echoed back in a notify on submit.",
+			        Callback = function(v) Fluent:Notify({ Title = "Input", Content = "Value: " .. v, Duration = 2 }) end,
+			})
+			secInputs:AddDivider()
+
+			local secColor = TabElements:AddSection("Colorpicker")
+			secColor:AddColorpicker("ShowcaseColor1", {
+			        Title = "Accent Preview",
+			        Icon = "solar/palette-bold",
+			        Default = Color3.fromRGB(255, 80, 80),
+			        Transparency = 0,
+			        Description = "Pick any colour — value shown in notify.",
+			        Callback = function(c) Fluent:Notify({ Title = "Color", Content = tostring(c), Duration = 2 }) end,
+			})
+			secColor:AddDivider()
+
+			local secKeybinds = TabElements:AddSection("Keybind")
+			secKeybinds:AddKeybind("ShowcaseBind1", {
+			        Title = "Toggle UI",
+			        Icon = "solar/keyboard-bold",
+			        Default = "RightAlt",
+			        Mode = "Toggle",
+			        Description = "Toggle mode: fires true/false each press.",
+			        Callback = function(state)
+			                if state then Window:Show() else Window:Hide() end
+			                Fluent:Notify({ Title = "Keybind", Content = state and "UI Shown" or "UI Hidden", Type = "Info", Duration = 2 })
+			        end,
+			})
+			secKeybinds:AddKeybind("ShowcaseBind2", {
+			        Title = "Hold Action",
+			        Icon = "solar/hand-holding-bold",
+			        Default = "RightShift",
+			        Mode = "Hold",
+			        Description = "Hold mode: fires true while held, false on release.",
+			        Callback = function(held)
+			                Fluent:Notify({ Title = "Hold", Content = held and "Holding…" or "Released", Type = held and "Warning" or "Info", Duration = 1 })
+			        end,
+			})
+			secKeybinds:AddDivider()
+
+			local secDD = TabElements:AddSection("Dropdown")
+			secDD:AddDropdown("ShowcaseDD1", {
+			        Title = "Single Select",
+			        Icon = "solar/list-bold",
+			        Values = { "Apple", "Banana", "Cherry", "Date", "Elderberry", "Fig", "Grape" },
+			        Default = "Apple",
+			        Description = "Standard single-select with search.",
+			        Callback = function(v) Fluent:Notify({ Title = "Dropdown", Content = tostring(v), Duration = 2 }) end,
+			})
+			secDD:AddDropdown("ShowcaseDD2", {
+			        Title = "Multi Select",
+			        Icon = "solar/layers-bold",
+			        Multi = true,
+			        Values = { "Fighter", "Mage", "Rogue", "Ranger", "Paladin", "Druid", "Bard" },
+			        Default = { "Fighter", "Mage" },
+			        Description = "Multi-select — holds a table of selected keys.",
+			        Callback = function(v)
+			                local parts = {}
+			                for k in next, v do table.insert(parts, k) end
+			                Fluent:Notify({ Title = "Multi DD", Content = table.concat(parts, ", "), Duration = 3 })
+			        end,
+			})
+			secDD:AddDropdown("ShowcaseDD3", {
+			        Title = "Outside Window",
+			        Icon = "solar/maximise-bold",
+			        Values = { "Option A", "Option B", "Option C", "Option D", "Option E" },
+			        Default = "Option A",
+			        OutsideWindow = true,
+			        Description = "Popup appears to the right of the window.",
+			        Callback = function(v) Fluent:Notify({ Title = "Outside Dropdown", Content = tostring(v), Duration = 2 }) end,
+			})
+			secDD:AddDivider()
+
+			local secCode = TabElements:AddSection("Code")
+			secCode:AddCode({
+			        Title = "Load FluentPro",
+			        Code = 'local Fluent = loadstring(game:HttpGet("https://github.com/StyearX/Fluent-Modded/releases/download/Fluent/FluentPro"))()',
+			        OnCopy = function() Fluent:Notify({ Title = "Code", Content = "Copied!", Duration = 2 }) end,
+			})
+			secCode:AddDivider()
+
+			local secMisc = TabElements:AddSection("Divider & Space")
+			secMisc:AddDivider()
+			secMisc:AddButton({ Title = "Button Above", Icon = "solar/star-bold", Callback = function() end })
+			secMisc:AddSpace({ Height = 20 })
+			secMisc:AddButton({ Title = "Button Below", Icon = "solar/star-bold", Callback = function() end })
+			secMisc:AddDivider()
+
+			local secImg = TabElements:AddSection("Image")
+			secImg:AddImage({ Image = "rbxassetid://7733960981", AspectRatio = "16:9", Radius = 10 })
+			secImg:AddImage({ Image = "https://od.lk/d/NjNfOTg0NzkzMzdf/YotsubaRt.png", AspectRatio = "16:9", Radius = 10 })
+			secImg:AddImage({ Image = "https://od.lk/d/NjNfOTg0NjQyNTRf/ft.png", AspectRatio = "16:9", Radius = 10 })
+			secImg:AddDivider()
+
+			local secVid = TabElements:AddSection("Video")
+			secVid:AddVideo({ Video = "rbxassetid://5670802294", AspectRatio = "16:9", Radius = 8, AutoPlay = false, Looped = true, Volume = 0.5 })
+			secVid:AddDivider()
+
+			local secAudio = TabElements:AddSection("Audio")
+			secAudio:AddAudio({
+			        Audio = "rbxassetid://142376088",
+			        Volume = 0.5,
+			        Looped = true,
+			        AutoPlay = false,
+			        AudioTitle = "Roblox Classic BGM",
+			        AudioSubtitle = "By Roblox",
+			        PlayOutsideWindow = false,
+			})
+			secAudio:AddAudio({
+			        Audio = "https://od.lk/d/NjNfODkwMDU1MDJf/hkmori%20-%20anybody%20can%20find%20love%20%28except%20you.%29%20%281%29.mp3",
+			        Volume = 0.4,
+			        Looped = true,
+			        AutoPlay = false,
+			        AudioTitle = "Anybody Can Find Love (Except You)",
+			        AudioSubtitle = "By hkmori",
+			        PlayOutsideWindow = true,
+			})
+			secAudio:AddAudio({
+			        Audio = "https://od.lk/d/NjNfOTg1Mjc4ODdf/kyszenn_-_Good_for_me_%28SkySound.cc%29.mp3",
+			        AudioTitle = "good for you",
+			        AudioSubtitle = "By kyszenn",
+			        Volume = 0.5,
+			        Looped = true,
+			        AutoPlay = false,
+			        PlayOutsideWindow = true,
+			})
+			secAudio:AddAudio({
+			        Audio = "https://od.lk/d/NjNfOTg1Mjc4ODhf/TARISHKA_-_Transformation_breakcore_%28SkySound.cc%29.mp3",
+			        AudioTitle = "Transformation (Breakcore)",
+			        AudioSubtitle = "By TARISHKAu",
+			        Volume = 0.5,
+			        Looped = true,
+			        AutoPlay = false,
+			        PlayOutsideWindow = true,
+			})
+			secAudio:AddAudio({
+			        Audio = "https://od.lk/d/NjNfOTg1Mjc4Nzdf/Removeface_Kyszenn_-_ON_THE_FLOOR_%28SkySound.cc%29%20%281%29.mp3",
+			        AudioTitle = "ON THE FLOOR!",
+			        AudioSubtitle = "",
+			        Volume = 0.5,
+			        Looped = true,
+			        AutoPlay = false,
+			        PlayOutsideWindow = true,
+			})
+			secAudio:AddDivider()
+
+			local secVP = TabElements:AddSection("Viewport")
+			local demoModel = Instance.new("Part")
+			demoModel.Shape = Enum.PartType.Ball
+			demoModel.Size = Vector3.new(4, 4, 4)
+			demoModel.BrickColor = BrickColor.new("Bright blue")
+			demoModel.Material = Enum.Material.Neon
+			demoModel.CFrame = CFrame.new(0, 0, 0)
+			demoModel.Anchored = true
+
+			local vpCamera = Instance.new("Camera")
+			vpCamera.CFrame = CFrame.new(Vector3.new(0, 3, 10), Vector3.new(0, 0, 0))
+
+			local vp = secVP:AddViewport({ Height = 200, Object = demoModel, Camera = vpCamera, Focused = true, Interactive = true })
+			secVP:AddButton({
+			        Title = "Swap to Red Cylinder",
+			        Icon = "solar/refresh-bold",
+			        Callback = function()
+			                local np = Instance.new("Part")
+			                np.Shape = Enum.PartType.Cylinder
+			                np.Size = Vector3.new(6, 3, 3)
+			                np.BrickColor = BrickColor.new("Bright red")
+			                np.Material = Enum.Material.SmoothPlastic
+			                np.Anchored = true
+			                vp:SetObject(np, false)
+			                vp:Focus()
+			                Fluent:Notify({ Title = "Viewport", Content = "Object swapped!", Type = "Info", Duration = 2 })
+			        end,
+			})
+			secVP:AddDivider()
+
+			local secFloating = TabElements:AddSection("Floating Button")
+			secFloating:AddToggle("FloatingBtnToggle", {
+			        Title = "Enable Floating Button",
+			        Icon = "solar/widget-bold",
+			        Default = false,
+			        Description = "Shows a draggable floating button overlay. Hold to lock/unlock. Long-hold to toggle circle mode.",
+			        Callback = function(v)
+			                if v then
+			                        if floatingGui then
+			                                floatingGui.Enabled = true
+			                        else
+			                                local floatingFrame, floatingButton, floatingApplyShape = CreateButton("FloatingOverlay", "text btw", 0.16, 0.12, function()
+			                                        Fluent:Notify({ Title = "Floating Button", Content = "Pressed!", Type = "Info", Duration = 2 })
+			                                end, false)
+			                                floatingGui = floatingFrame.Parent  -- ScreenGui
+			                                floatingBtn = floatingButton
+			                                FloatingButtonManager:AddButton("FloatingOverlay", floatingButton, false, false, floatingApplyShape, floatingFrame)
+			                        end
+			                else
+			                        if floatingGui then
+			                                floatingGui.Enabled = false
+			                        end
+			                end
+			        end,
+			})
+			secFloating:AddDivider()
+
+			local TabComponents = Window:AddTab({ Title = "UI Components", Icon = "solar/widget-bold" })
+
+			local secUserInfo = TabComponents:AddSection("UserInfo")
+			secUserInfo:AddCode({
+			        Title = "UserInfo options in CreateWindow",
+			        Code = 'Fluent:CreateWindow({\n    UserInfoTop      = true,\n    UserInfoTitle    = "My Script",\n    UserInfoSubtitle = "v1.0.0",\n    UserInfoColor    = Color3.fromRGB(0, 180, 255),\n})',
+			        OnCopy = function() Fluent:Notify({ Title = "Code", Content = "Copied!", Duration = 2 }) end,
+			})
+			secUserInfo:AddDivider()
+
+			local secNotify = TabComponents:AddSection("Notifications")
+			secNotify:AddButton({ Title = "Info",    Icon = "solar/info-circle-bold",     Callback = function() Fluent:Notify({ Title = "Info",    Content = "Informational notification.",        Type = "Info",    Duration = 4 }) end })
+			secNotify:AddButton({ Title = "Success", Icon = "solar/check-circle-bold",    Callback = function() Fluent:Notify({ Title = "Success", Content = "Operation completed successfully!", Type = "Success", Duration = 4 }) end })
+			secNotify:AddButton({ Title = "Warning", Icon = "solar/danger-triangle-bold", Callback = function() Fluent:Notify({ Title = "Warning", Content = "Something might go wrong.",          Type = "Warning", Duration = 4 }) end })
+			secNotify:AddButton({ Title = "Error",   Icon = "solar/close-circle-bold",    Callback = function() Fluent:Notify({ Title = "Error",   Content = "An error occurred.",                Type = "Error",   Duration = 4 }) end })
+			secNotify:AddButton({
+			        Title = "With SubContent",
+			        Icon = "solar/document-bold",
+			        Callback = function() Fluent:Notify({ Title = "SubContent Demo", Content = "Main message line.", SubContent = "Secondary detail shown below.", Type = "Info", Duration = 5 }) end,
+			})
+			secNotify:AddDivider()
+
+			local secDialog = TabComponents:AddSection("Dialogs")
+			secDialog:AddButton({
+			        Title = "2-Button Confirm",
+			        Icon = "solar/chat-round-bold",
+			        Callback = function()
+			                Window:Dialog({
+			                        Title = "Confirm Action",
+			                        Content = "Are you sure you want to proceed?",
+			                        Buttons = {
+			                                { Title = "Yes", Callback = function() Fluent:Notify({ Title = "Dialog", Content = "Confirmed!", Type = "Success", Duration = 3 }) end },
+			                                { Title = "No",  Callback = function() Fluent:Notify({ Title = "Dialog", Content = "Cancelled.", Type = "Info",    Duration = 3 }) end },
+			                        },
+			                })
+			        end,
+			})
+			secDialog:AddButton({
+			        Title = "3-Button Save?",
+			        Icon = "solar/chat-round-dots-bold",
+			        Callback = function()
+			                Window:Dialog({
+			                        Title = "Save Changes?",
+			                        Content = "Do you want to save before closing?",
+			                        Buttons = {
+			                                { Title = "Save",    Callback = function() Fluent:Notify({ Title = "Dialog", Content = "Saved!",     Type = "Success", Duration = 3 }) end },
+			                                { Title = "Discard", Callback = function() Fluent:Notify({ Title = "Dialog", Content = "Discarded.", Type = "Warning", Duration = 3 }) end },
+			                                { Title = "Cancel" },
+			                        },
+			                })
+			        end,
+			})
+			secDialog:AddButton({
+			        Title = "Input Dialog",
+			        Icon = "solar/pen-bold",
+			        Callback = function()
+			                Window:Dialog({
+			                        Title = "Enter Value",
+			                        Content = "Type something in the field below:",
+			                        Input = { Placeholder = "Your input here…" },
+			                        Buttons = {
+			                                { Title = "Submit", Callback = function(v) Fluent:Notify({ Title = "Submitted", Content = tostring(v), Type = "Success", Duration = 4 }) end },
+			                                { Title = "Cancel" },
+			                        },
+			                })
+			        end,
+			})
+			secDialog:AddDivider()
+
+			local secGrp = TabComponents:AddSection("Group")
+			local grp2 = secGrp:AddGroup({ Columns = 2, Gap = 6 })
+			local col2A = grp2:AddElement()
+			local col2B = grp2:AddElement()
+			col2A:AddButton({ Title = "Left",  Icon = "solar/arrow-left-bold",  Callback = function() Fluent:Notify({ Title = "Group", Content = "Left",  Type = "Info",    Duration = 2 }) end })
+			col2B:AddButton({ Title = "Right", Icon = "solar/arrow-right-bold", Callback = function() Fluent:Notify({ Title = "Group", Content = "Right", Type = "Success", Duration = 2 }) end })
+			col2A:AddToggle("GrpTglA", { Title = "Toggle A", Default = false, Callback = function(v) Fluent:Notify({ Title = "A", Content = tostring(v), Duration = 2 }) end })
+			col2B:AddToggle("GrpTglB", { Title = "Toggle B", Default = false, Callback = function(v) Fluent:Notify({ Title = "B", Content = tostring(v), Duration = 2 }) end })
+			secGrp:AddDivider()
+
+			local secTheme = TabComponents:AddSection("Built-in Themes")
+			for _, name in ipairs({
+			        "AMOLED", "Ash Gray", "Blood Red", "Cyanic", "Amber Glow", "Deep Violet",
+			        "Neon Cyber", "Neon Purple", "Royal Blue", "Deep Ocean", "RGB", "Orange",
+			        "Charcoal", "Pearl White", "Midnight", "Galaxy Purple", "Cosmic Violet",
+			        "Cotton Candy", "Arctic Frost",
+			}) do
+			        local n = name
+			        secTheme:AddButton({
+			                Title = n,
+			                Icon = "solar/palette-bold",
+			                Callback = function()
+			                        Fluent:SetTheme(n)
+			                        Fluent:Notify({ Title = "Theme", Content = n .. " applied!", Type = "Info", Duration = 2 })
+			                end,
+			        })
+			end
+
+			local secCustomTheme = TabComponents:AddSection("Custom Themes")
+			secCustomTheme:AddButton({
+			        Title = "Apply NeonBlue",
+			        Icon = "solar/star-bold",
+			        Callback = function()
+			                Fluent:SetTheme("NeonBlue")
+			                Fluent:Notify({ Title = "Theme", Content = "NeonBlue applied!", Type = "Success", Duration = 2 })
+			        end,
+			})
+			secCustomTheme:AddButton({
+			        Title = "Apply EmeraldDark",
+			        Icon = "solar/leaf-bold",
+			        Callback = function()
+			                Fluent:SetTheme("EmeraldDark")
+			                Fluent:Notify({ Title = "Theme", Content = "EmeraldDark applied!", Type = "Success", Duration = 2 })
+			        end,
+			})
+			secCustomTheme:AddDivider()
+
+			local TabIcons = Window:AddTab({ Title = "UI Icons", Icon = "solar/star-bold" })
+
+			local secIconInfo = TabIcons:AddSection("Icon System")
+			secIconInfo:AddCode({
+			        Title = "Using an icon in any element",
+			        Code = 'section:AddButton({\n    Title="My Button",\n    Icon="solar/home-bold",\n    Callback=function() end,\n})',
+			        OnCopy = function() Fluent:Notify({ Title = "Code", Content = "Copied!", Duration = 2 }) end,
+			})
+			secIconInfo:AddDivider()
+
+			local secSolar = TabIcons:AddSection("solar/")
+			local solarIcons = {
+			        "solar/home-bold", "solar/star-bold", "solar/settings-bold", "solar/bell-bold",
+			        "solar/palette-bold", "solar/layers-bold", "solar/widget-bold", "solar/list-bold",
+			        "solar/gallery-bold", "solar/chat-round-bold", "solar/user-bold", "solar/planet-bold",
+			        "solar/keyboard-bold", "solar/eye-bold", "solar/running-bold", "solar/arrow-up-bold",
+			        "solar/restart-bold", "solar/refresh-bold", "solar/export-bold", "solar/import-bold",
+			        "solar/volume-loud-bold", "solar/cursor-bold", "solar/camera-bold", "solar/maximize-bold",
+			        "solar/pen-bold", "solar/diskette-bold", "solar/upload-minimalistic-bold", "solar/info-circle-bold",
+			        "solar/check-circle-bold", "solar/danger-triangle-bold", "solar/close-circle-bold", "solar/stars-bold",
+			        "solar/tag-bold", "solar/menu-dots-bold", "solar/document-bold", "solar/hand-holding-bold",
+			}
+			for _, icon in ipairs(solarIcons) do
+			        secSolar:AddButton({
+			                Title = icon:gsub("solar/", ""),
+			                Icon = icon,
+			                Description = 'Icon key: "' .. icon .. '"',
+			                Callback = function() Fluent:Notify({ Title = "Icon", Content = icon, Duration = 3 }) end,
+			        })
+			end
+			secSolar:AddDivider()
+
+			local secLucide = TabIcons:AddSection("lucide/")
+			local lucideIcons = {
+			        "lucide/home", "lucide/star", "lucide/settings", "lucide/bell",
+			        "lucide/layers", "lucide/user", "lucide/eye", "lucide/camera",
+			        "lucide/refresh-cw", "lucide/download", "lucide/upload", "lucide/search",
+			        "lucide/check", "lucide/x", "lucide/alert-triangle", "lucide/info",
+			        "lucide/music", "lucide/image", "lucide/video", "lucide/code",
+			}
+			for _, icon in ipairs(lucideIcons) do
+			        secLucide:AddButton({
+			                Title = icon:gsub("lucide/", ""),
+			                Icon = icon,
+			                Description = 'Icon key: "' .. icon .. '"',
+			                Callback = function() Fluent:Notify({ Title = "Icon", Content = icon, Duration = 3 }) end,
+			        })
+			end
+			secLucide:AddDivider()
+
+			local secOtherPacks = TabIcons:AddSection("Other Packs")
+			secOtherPacks:AddCode({
+			        Title = "Using any pack",
+			        Code = 'Icon = "gravity/home"\nIcon = "sfsymbols/star.fill"\nIcon = "gmi/home"\nIcon = "hero/home"',
+			        OnCopy = function() Fluent:Notify({ Title = "Code", Content = "Copied!", Duration = 2 }) end,
+			})
+			secOtherPacks:AddDivider()
+
+		end)
+		if not okShow then
+			warn("[Red Hub Astral] showcase tabs failed: " .. tostring(errShow))
+		end
+
+		-- Settings
+		local settings = UI.createTab("Settings", "solar/settings-bold")
+		UI.addSection(settings, "About")
+		safe("button", "About", function()
+			curSection(settings):AddButton({
+				Title = "by owner @cww_5",
+				Description = "@zoxamo",
+				Callback = function()
+					Fluent:Notify({Title = "Red Hub Astral", Content = "by owner @cww_5 | @zoxamo", Type = "Info", Duration = 3})
+				end,
+			})
+		end)
+		UI.addSection(settings, "Aim")
+		UI.addToggle(settings, "Hold RMB to aim", K("HoldRMB"), function(v) State.HoldRMB = v end)
+
+		pcall(function() MediaManager:SetFolder("RedHubAstral/MediaCache") end)
+		pcall(function()
+			InterfaceManager:SetLibrary(Fluent)
+			InterfaceManager:SetFolder("RedHubAstral")
+			InterfaceManager:BuildInterfaceSection(settings.tab)
+			InterfaceManager:LoadSettings()
+		end)
+		pcall(function()
+			SaveManager:SetLibrary(Fluent)
+			SaveManager:SetFolder("RedHubAstral/Config")
+			SaveManager:IgnoreThemeSettings()
+			SaveManager:BuildConfigSection(settings.tab)
+			SaveManager:LoadAutoloadConfig()
+		end)
+		pcall(function()
+			FloatingButtonManager:SetLibrary(Fluent)
+			FloatingButtonManager:SetFolder("RedHubAstral/Floating")
+			FloatingButtonManager:AddButton("OpenUiBtn", menuBtn, false, false, nil, menuBtn)
+			FloatingButtonManager:BuildConfigSection(settings.tab)
+			FloatingButtonManager:LoadAutoloadConfig()
+		end)
+
+		-- Safety net: if a menu callback does not fire, read the value straight from the library
+		task.spawn(function()
+			while true do
+				task.wait(0.15)
+				local opts = Fluent.Options
+				if type(opts) == "table" then
+					for _, b in bindings do
+						local o = opts[b.id]
+						local v = o and o.Value
+						if v ~= nil and v ~= State[b.id] and type(v) == type(State[b.id]) then
+							pcall(b.callback, v)
+						end
+					end
+				end
+			end
+		end)
+
+		task.delay(0.5, function()
+			pcall(function() Window:SelectTab(1) end)
+			pcall(function()
+				Fluent:Notify({Title = "Red Hub Astral", Content = "Loaded", Type = "Success", Duration = 3})
+			end)
+		end)
+	end)
+	if not ok then
+		warn("[Red Hub Astral] FluentPro menu failed: " .. tostring(err))
+		pcall(function() Fluent:Destroy() end)
+		return false
+	end
+	return true
+end
+
+--------------------------------------------------------------------
+-- Menu 2: built-in menu (fallback, works as a normal LocalScript)
+--------------------------------------------------------------------
+local function startCustomUI()
+	local gui = new("ScreenGui", {
+		Name = "RedHubAstral", ResetOnSpawn = false, DisplayOrder = 10,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
+
+	local WIN_W, WIN_H = 540, 330
+
+	local window = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(WIN_W, WIN_H), BackgroundColor3 = BG,
+	}, gui)
+	corner(window, 14)
+	local winStroke = new("UIStroke", {Thickness = 1.6, Color = WHITE}, window)
+	addShimmer(winStroke, 60)
+	local uiScale = new("UIScale", {Scale = 1}, window)
+
+	-- Top bar
+	local title = new("Frame", {Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = PANEL}, window)
+	corner(title, 14)
+	new("Frame", {
+		Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 1, -14),
+		BackgroundColor3 = PANEL, BorderSizePixel = 0,
+	}, title)
+
+	local topR = new("TextLabel", {
+		Size = UDim2.fromOffset(28, 46), Position = UDim2.fromOffset(14, 0),
+		BackgroundTransparency = 1, Text = "R", TextColor3 = NEON,
+		Font = Enum.Font.Fantasy, TextSize = 34,
+	}, title)
+	new("UIStroke", {Thickness = 1.5, Color = NEON, Transparency = 0.55}, topR)
+
+	new("TextLabel", {
+		Size = UDim2.new(1, -120, 1, 0), Position = UDim2.fromOffset(48, 0),
+		BackgroundTransparency = 1, Text = "RED HUB ASTRAL", TextColor3 = WHITE,
+		Font = Enum.Font.GothamBlack, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left,
+	}, title)
+
+	local accentLine = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 2), Position = UDim2.fromOffset(0, 46),
+		BackgroundColor3 = ACCENT, BorderSizePixel = 0,
+	}, window)
+	new("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(0.6, 0.6),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+	}, accentLine)
+
+	local closeBtn = new("TextButton", {
+		Size = UDim2.fromOffset(32, 26), AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -10, 0.5, 0), BackgroundColor3 = TAB_ACTIVE,
+		Text = "X", TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 13,
+		AutoButtonColor = false,
+	}, title)
+	corner(closeBtn, 8)
+	closeBtn.MouseEnter:Connect(function() tween(closeBtn, {BackgroundColor3 = ACCENT}) end)
+	closeBtn.MouseLeave:Connect(function() tween(closeBtn, {BackgroundColor3 = TAB_ACTIVE}) end)
+
+	-- Open / close animation + auto-fit for phone screens
+	local baseScale = 1
+	local animValue = Instance.new("NumberValue")
+	animValue.Value = 1
+	local function applyScale() uiScale.Scale = baseScale * animValue.Value end
+	animValue.Changed:Connect(applyScale)
+
+	local lastVS
+	RunService.RenderStepped:Connect(function()
+		local cam = Workspace.CurrentCamera
+		if not cam then return end
+		local vs = cam.ViewportSize
+		if vs == lastVS then return end
+		lastVS = vs
+		baseScale = math.clamp(math.min(vs.X * 0.94 / WIN_W, vs.Y * 0.9 / WIN_H), 0.45, 1.2)
+		applyScale()
+	end)
+
+	local isOpen = true
+	local function setOpen(open)
+		isOpen = open
+		if open then
+			window.Visible = true
+			animValue.Value = 0.85
+			TweenService:Create(animValue, TWEEN, {Value = 1}):Play()
+		else
+			local t = TweenService:Create(animValue, TWEEN, {Value = 0.85})
+			t.Completed:Connect(function()
+				if not isOpen then window.Visible = false end
+			end)
+			t:Play()
+		end
+	end
+	local function toggleWindow() setOpen(not isOpen) end
+
+	closeBtn.Activated:Connect(function() setOpen(false) end)
+
+	UIS.InputBegan:Connect(function(input, gpe)
+		if gpe then return end
+		if input.KeyCode == Enum.KeyCode[State.MenuKey] then
+			toggleWindow()
+		end
+	end)
+
+	-- Round menu button: neon R (or your image), draggable, tap = open/close
+	local MENU_SIZE = 62
+	local menuBtn = new("TextButton", {
+		Size = UDim2.fromOffset(MENU_SIZE, MENU_SIZE), Position = UDim2.new(0, 12, 0.5, -MENU_SIZE / 2),
+		BackgroundColor3 = BG, Text = "", AutoButtonColor = false,
+	}, gui)
+	corner(menuBtn, MENU_SIZE)
+	local ring = new("UIStroke", {
+		Thickness = 2.5, Color = WHITE, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, menuBtn)
+	addShimmer(ring, 120)
+
+	local glowTarget
+	if LOGO_IMAGE ~= "" then
+		local img = new("ImageLabel", {
+			Size = UDim2.new(1, -8, 1, -8), Position = UDim2.fromOffset(4, 4),
+			BackgroundTransparency = 1, Image = LOGO_IMAGE, ScaleType = Enum.ScaleType.Fit,
+		}, menuBtn)
+		corner(img, MENU_SIZE)
+		glowTarget = ring
+	else
+		local rLabel = new("TextLabel", {
+			Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "R",
+			TextColor3 = NEON, Font = Enum.Font.Fantasy, TextSize = 46,
+		}, menuBtn)
+		glowTarget = new("UIStroke", {Thickness = 3, Color = NEON, Transparency = 0.5}, rLabel)
+	end
+	-- pulsing neon glow
+	TweenService:Create(
+		glowTarget,
+		TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{Transparency = 0.9}
+	):Play()
+	TweenService:Create(
+		ring,
+		TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{Thickness = 4}
+	):Play()
+
+	do
+		local pressing, moved, startPos, btnStart = false, false, nil, nil
+		menuBtn.InputBegan:Connect(function(i)
+			if isPointer(i) then
+				pressing, moved = true, false
+				startPos = i.Position
+				btnStart = menuBtn.Position
+			end
+		end)
+		UIS.InputChanged:Connect(function(i)
+			if pressing and isMove(i) then
+				local d = i.Position - startPos
+				if d.Magnitude > 8 then moved = true end
+				if moved then
+					menuBtn.Position = UDim2.new(
+						btnStart.X.Scale, btnStart.X.Offset + d.X,
+						btnStart.Y.Scale, btnStart.Y.Offset + d.Y
+					)
+				end
+			end
+		end)
+		UIS.InputEnded:Connect(function(i)
+			if pressing and isPointer(i) then
+				pressing = false
+				if not moved then toggleWindow() end
+			end
+		end)
+	end
+
+	-- Drag window by the top bar
+	do
+		local dragging, dragStart, startPos = false, nil, nil
+		title.InputBegan:Connect(function(i)
+			if isPointer(i) then
+				dragging = true
+				dragStart = i.Position
+				startPos = window.Position
+			end
+		end)
+		UIS.InputChanged:Connect(function(i)
+			if dragging and isMove(i) then
+				local d = i.Position - dragStart
+				window.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + d.X,
+					startPos.Y.Scale, startPos.Y.Offset + d.Y
+				)
+			end
+		end)
+		UIS.InputEnded:Connect(function(i)
+			if isPointer(i) then dragging = false end
+		end)
+	end
+
+	-- Tabs
+	local tabList = new("Frame", {
+		Size = UDim2.new(0, 140, 1, -66), Position = UDim2.fromOffset(8, 58),
+		BackgroundTransparency = 1,
+	}, window)
+	new("UIListLayout", {Padding = UDim.new(0, 6)}, tabList)
+
+	new("Frame", {
+		Size = UDim2.new(0, 1, 1, -66), Position = UDim2.fromOffset(154, 58),
+		BackgroundColor3 = BORDER, BorderSizePixel = 0,
+	}, window)
+
+	local content = new("Frame", {
+		Size = UDim2.new(1, -172, 1, -66), Position = UDim2.fromOffset(162, 58),
+		BackgroundTransparency = 1,
+	}, window)
+
+	local pages, tabButtons = {}, {}
+
+	local function selectTab(name)
+		for n, page in pages do
+			local active = (n == name)
+			page.Visible = active
+			local t = tabButtons[n]
+			tween(t.btn, {BackgroundColor3 = active and TAB_ACTIVE or PANEL, TextTransparency = active and 0 or 0.35})
+			tween(t.bar, {BackgroundTransparency = active and 0 or 1})
+		end
+	end
+
+	local function createTab(name)
+		local btn = new("TextButton", {
+			Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = PANEL,
+			Text = name, TextColor3 = WHITE, Font = Enum.Font.GothamMedium,
+			TextSize = 14, AutoButtonColor = false, TextTransparency = 0.35,
+			TextXAlignment = Enum.TextXAlignment.Left,
+		}, tabList)
+		corner(btn, 8)
+		new("UIPadding", {PaddingLeft = UDim.new(0, 16)}, btn)
+		local bar = new("Frame", {
+			Size = UDim2.fromOffset(3, 16), Position = UDim2.new(0, -10, 0.5, -8),
+			BackgroundColor3 = ACCENT, BackgroundTransparency = 1, BorderSizePixel = 0,
+		}, btn)
+		corner(bar, 2)
+		local page = new("ScrollingFrame", {
+			Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+			ScrollBarThickness = 3, ScrollBarImageColor3 = WHITE,
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			CanvasSize = UDim2.new(), Visible = false,
+		}, content)
+		new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, page)
+		pages[name] = page
+		tabButtons[name] = {btn = btn, bar = bar}
+		btn.Activated:Connect(function() selectTab(name) end)
+		return page
+	end
+
+	-- Elements: toggle, slider, cycle, section, legend
+	-- Registry of UI controls (used by configs)
+	local controls = {}
+
+	local function makeRow(page, height)
+		local row = new("Frame", {Size = UDim2.new(1, -8, 0, height), BackgroundColor3 = PANEL}, page)
+		corner(row, 8)
+		local stroke = new("UIStroke", {Thickness = 1, Color = BORDER}, row)
+		return row, stroke
+	end
+
+	local function rowLabel(row, text)
+		return new("TextLabel", {
+			Size = UDim2.new(1, -70, 0, 22), Position = UDim2.fromOffset(12, 6),
+			BackgroundTransparency = 1, Text = text, TextColor3 = WHITE,
+			Font = Enum.Font.Gotham, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+		}, row)
+	end
+
+	local function addToggle(page, text, default, callback)
+		local key = pendingKey
+		pendingKey = nil
+		local row, rowStroke = makeRow(page, 36)
+		rowLabel(row, text)
+		local btn = new("TextButton", {
+			Size = UDim2.fromOffset(42, 22), AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -12, 0.5, 0), Text = "", AutoButtonColor = false,
+		}, row)
+		corner(btn, 11)
+		local knob = new("Frame", {Size = UDim2.fromOffset(18, 18), BackgroundColor3 = WHITE}, btn)
+		corner(knob, 9)
+
+		local on = default
+		local function render(animated)
+			local trackGoal = {BackgroundColor3 = on and WHITE or OFF}
+			local knobGoal = {
+				Position = on and UDim2.fromOffset(22, 2) or UDim2.fromOffset(2, 2),
+				BackgroundColor3 = on and BLACK or WHITE,
+			}
+			local strokeGoal = {Color = on and ACCENT or BORDER}
+			if animated then
+				tween(btn, trackGoal)
+				tween(knob, knobGoal)
+				tween(rowStroke, strokeGoal)
+			else
+				for k, v in trackGoal do btn[k] = v end
+				for k, v in knobGoal do knob[k] = v end
+				for k, v in strokeGoal do rowStroke[k] = v end
+			end
+		end
+		render(false)
+		btn.Activated:Connect(function()
+			on = not on
+			render(true)
+			callback(on)
+		end)
+		if key then
+			controls[key] = {type = "boolean", set = function(v)
+				if v == on then return end
+				on = v
+				render(true)
+				callback(v)
+			end}
+		end
+	end
+
+	local function addSlider(page, text, min, max, default, callback)
+		local key = pendingKey
+		pendingKey = nil
+		local row = makeRow(page, 54)
+		local lbl = rowLabel(row, text)
+		lbl.Size = UDim2.new(1, -90, 0, 22)
+		local valLbl = new("TextLabel", {
+			Size = UDim2.fromOffset(60, 22), AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -12, 0, 6), BackgroundTransparency = 1,
+			Text = tostring(default), TextColor3 = WHITE, Font = Enum.Font.GothamBold,
+			TextSize = 14, TextXAlignment = Enum.TextXAlignment.Right,
+		}, row)
+		local bar = new("Frame", {
+			Size = UDim2.new(1, -24, 0, 6), Position = UDim2.fromOffset(12, 38),
+			BackgroundColor3 = OFF,
+		}, row)
+		corner(bar, 3)
+		local a0 = (default - min) / (max - min)
+		local fill = new("Frame", {
+			Size = UDim2.fromScale(a0, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0,
+		}, bar)
+		corner(fill, 3)
+		local knob = new("Frame", {
+			Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(a0, 0.5), BackgroundColor3 = WHITE,
+		}, bar)
+		corner(knob, 7)
+		new("UIStroke", {Thickness = 2, Color = ACCENT}, knob)
+		local hit = new("TextButton", {
+			Size = UDim2.new(1, 0, 0, 28), Position = UDim2.fromOffset(0, -11),
+			BackgroundTransparency = 1, Text = "",
+		}, bar)
+
+		local dragging = false
+		local function setFromX(x)
+			local a = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+			local v = math.floor(min + (max - min) * a + 0.5)
+			fill.Size = UDim2.fromScale(a, 1)
+			knob.Position = UDim2.fromScale(a, 0.5)
+			valLbl.Text = tostring(v)
+			callback(v)
+		end
+		hit.InputBegan:Connect(function(i)
+			if isPointer(i) then
+				dragging = true
+				page.ScrollingEnabled = false
+				setFromX(i.Position.X)
+			end
+		end)
+		UIS.InputChanged:Connect(function(i)
+			if dragging and isMove(i) then setFromX(i.Position.X) end
+		end)
+		UIS.InputEnded:Connect(function(i)
+			if dragging and isPointer(i) then
+				dragging = false
+				page.ScrollingEnabled = true
+			end
+		end)
+		if key then
+			controls[key] = {type = "number", set = function(v)
+				v = math.clamp(math.floor(v + 0.5), min, max)
+				local a = (v - min) / (max - min)
+				fill.Size = UDim2.fromScale(a, 1)
+				knob.Position = UDim2.fromScale(a, 0.5)
+				valLbl.Text = tostring(v)
+				callback(v)
+			end}
+		end
+	end
+
+	local function addCycle(page, text, options, default, callback)
+		local key = pendingKey
+		pendingKey = nil
+		local row = makeRow(page, 36)
+		rowLabel(row, text)
+		local idx = table.find(options, default) or 1
+		local btn = new("TextButton", {
+			Size = UDim2.fromOffset(100, 24), AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -10, 0.5, 0), BackgroundColor3 = TAB_ACTIVE,
+			Text = options[idx], TextColor3 = WHITE, Font = Enum.Font.GothamMedium, TextSize = 13,
+			AutoButtonColor = false,
+		}, row)
+		corner(btn, 7)
+		btn.Activated:Connect(function()
+			idx = idx % #options + 1
+			btn.Text = options[idx]
+			callback(options[idx])
+		end)
+		if key then
+			controls[key] = {type = "string", set = function(v)
+				local i = table.find(options, v)
+				if not i or i == idx then return end
+				idx = i
+				btn.Text = v
+				callback(v)
+			end}
+		end
+	end
+
+	local function addSection(page, text)
+		local holder = new("Frame", {Size = UDim2.new(1, -8, 0, 22), BackgroundTransparency = 1}, page)
+		local mark = new("Frame", {
+			Size = UDim2.fromOffset(3, 12), Position = UDim2.fromOffset(2, 5),
+			BackgroundColor3 = ACCENT, BorderSizePixel = 0,
+		}, holder)
+		corner(mark, 2)
+		new("TextLabel", {
+			Size = UDim2.new(1, -12, 1, 0), Position = UDim2.fromOffset(12, 0),
+			BackgroundTransparency = 1, Text = string.upper(text), TextColor3 = WHITE,
+			Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+		}, holder)
+	end
+
+	local function addLegend(page)
+		local row = makeRow(page, 36)
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+		}, row)
+		for _, role in {"Murderer", "Sheriff", "Innocent"} do
+			new("TextLabel", {
+				Size = UDim2.new(1 / 3, 0, 1, 0), BackgroundTransparency = 1,
+				Text = role, TextColor3 = ROLE_COLORS[role],
+				Font = Enum.Font.GothamBold, TextSize = 13,
+			}, row)
+		end
+	end
+
+
+	local UI = {
+		createTab = createTab, addSection = addSection, addToggle = addToggle,
+		addSlider = addSlider, addCycle = addCycle,
+		addRoleColors = function(page) addLegend(page) end,
+	}
+	buildTabs(UI)
+
+	local settings = createTab("Settings")
+
+	-- About -------------------------------------------------------------
+	addSection(settings, "About")
+	do
+		local row = makeRow(settings, 56)
+		new("TextLabel", {
+			Size = UDim2.new(1, -20, 0, 22), Position = UDim2.fromOffset(10, 7),
+			BackgroundTransparency = 1, Text = "by owner @cww_5", TextColor3 = WHITE,
+			Font = Enum.Font.GothamBold, TextSize = 15,
+		}, row)
+		new("TextLabel", {
+			Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(10, 29),
+			BackgroundTransparency = 1, Text = "@zoxamo", TextColor3 = WHITE,
+			Font = Enum.Font.GothamBold, TextSize = 14,
+		}, row)
+	end
+
+	-- Config storage ----------------------------------------------------
+	-- Uses files (writefile/readfile) when the environment has them,
+	-- otherwise configs live in memory until you leave the game.
+	local CFG_ROOT = "RedHubAstral"
+	local CFG_DIR = CFG_ROOT .. "/configs"
+	local hasFS = type(writefile) == "function" and type(readfile) == "function"
+		and type(isfile) == "function" and type(listfiles) == "function"
+		and type(delfile) == "function" and type(makefolder) == "function"
+		and type(isfolder) == "function"
+	local memStore = {}
+
+	local function ensureDir()
+		if not hasFS then return end
+		pcall(function()
+			if not isfolder(CFG_ROOT) then makefolder(CFG_ROOT) end
+			if not isfolder(CFG_DIR) then makefolder(CFG_DIR) end
+		end)
+	end
+
+	local function cleanName(n)
+		n = (tostring(n or ""):gsub("[^%w _%-]", ""))
+		n = n:match("^%s*(.-)%s*$") or ""
+		return string.sub(n, 1, 24)
+	end
+
+	local function cfgPath(name)
+		return CFG_DIR .. "/" .. name .. ".json"
+	end
+
+	local function listConfigs()
+		local names = {}
+		if hasFS then
+			ensureDir()
+			local ok, files = pcall(listfiles, CFG_DIR)
+			if ok and type(files) == "table" then
+				for _, f in files do
+					local n = tostring(f):match("([^/\\]+)%.json$")
+					if n then table.insert(names, n) end
+				end
+			end
+		else
+			for n in memStore do table.insert(names, n) end
+		end
+		table.sort(names, function(a, b) return a:lower() < b:lower() end)
+		return names
+	end
+
+	local function findConfig(name)
+		for _, n in listConfigs() do
+			if n:lower() == name:lower() then return n end
+		end
+	end
+
+	local function writeConfig(name, data)
+		if hasFS then
+			ensureDir()
+			return (pcall(writefile, cfgPath(name), data))
+		end
+		memStore[name] = data
+		return true
+	end
+
+	local function readConfig(name)
+		if hasFS then
+			local ok, data = pcall(function()
+				if isfile(cfgPath(name)) then return readfile(cfgPath(name)) end
+			end)
+			return ok and data or nil
+		end
+		return memStore[name]
+	end
+
+	local function removeConfig(name)
+		if hasFS then
+			pcall(delfile, cfgPath(name))
+		else
+			memStore[name] = nil
+		end
+	end
+
+	local function snapshot()
+		local data = {}
+		for key in controls do
+			data[key] = State[key]
+		end
+		return HttpService:JSONEncode(data)
+	end
+
+	local function applyConfig(json)
+		local ok, data = pcall(function() return HttpService:JSONDecode(json) end)
+		if not ok or type(data) ~= "table" then return false end
+		for key, val in data do
+			local c = controls[key]
+			if c and type(val) == c.type then
+				pcall(c.set, val)
+			end
+		end
+		return true
+	end
+
+	-- Config UI ---------------------------------------------------------
+	addSection(settings, "Config")
+
+	local infoRow = makeRow(settings, 30)
+	new("TextLabel", {
+		Size = UDim2.new(1, -20, 1, 0), Position = UDim2.fromOffset(10, 0),
+		BackgroundTransparency = 1, TextColor3 = WHITE, TextTransparency = 0.35,
+		Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+		Text = hasFS and ("Storage: files (" .. CFG_DIR .. ")") or "Storage: session only (no file access)",
+	}, infoRow)
+
+	local nameRow = makeRow(settings, 38)
+	local nameBox = new("TextBox", {
+		Size = UDim2.new(1, -20, 0, 26), Position = UDim2.fromOffset(10, 6),
+		BackgroundColor3 = TAB_ACTIVE, TextColor3 = WHITE, PlaceholderText = "Config name",
+		PlaceholderColor3 = Color3.fromRGB(150, 150, 150), Text = "",
+		Font = Enum.Font.Gotham, TextSize = 14, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+	}, nameRow)
+	corner(nameBox, 7)
+	new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)}, nameBox)
+
+	local btnRow = makeRow(settings, 38)
+	local function cfgButton(text, index, count, onClick)
+		local b = new("TextButton", {
+			Size = UDim2.new(1 / count, -6, 0, 26), Position = UDim2.new((index - 1) / count, 3, 0.5, -13),
+			BackgroundColor3 = TAB_ACTIVE, Text = text, TextColor3 = WHITE,
+			Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = false,
+		}, btnRow)
+		corner(b, 7)
+		b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = OFF}) end)
+		b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = TAB_ACTIVE}) end)
+		b.Activated:Connect(onClick)
+	end
+
+	local statusRow = makeRow(settings, 34)
+	local statusLabel = new("TextLabel", {
+		Size = UDim2.new(1, -20, 1, 0), Position = UDim2.fromOffset(10, 0),
+		BackgroundTransparency = 1, TextColor3 = WHITE, Text = "Ready",
+		Font = Enum.Font.GothamMedium, TextSize = 12, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, statusRow)
+	local function setStatus(t) statusLabel.Text = t end
+
+	local listHolder = new("Frame", {
+		Size = UDim2.new(1, -8, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = PANEL,
+	}, settings)
+	corner(listHolder, 8)
+	new("UIStroke", {Thickness = 1, Color = BORDER}, listHolder)
+	new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, listHolder)
+	new("UIPadding", {
+		PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6),
+		PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
+	}, listHolder)
+
+	local selected, delArm = nil, nil
+	local refreshList
+
+	refreshList = function()
+		for _, c in listHolder:GetChildren() do
+			if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+		end
+		local names = listConfigs()
+		if selected and not table.find(names, selected) then selected = nil end
+
+		if #names == 0 then
+			new("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
+				Text = "No configs yet", TextColor3 = WHITE, TextTransparency = 0.4,
+				Font = Enum.Font.Gotham, TextSize = 13,
+			}, listHolder)
+			return
+		end
+
+		for i, n in names do
+			local isSel = (n == selected)
+			local b = new("TextButton", {
+				Size = UDim2.new(1, 0, 0, 28), LayoutOrder = i,
+				BackgroundColor3 = isSel and TAB_ACTIVE or PANEL,
+				Text = n, TextColor3 = WHITE, Font = Enum.Font.GothamMedium, TextSize = 13,
+				AutoButtonColor = false,
+			}, listHolder)
+			corner(b, 7)
+			local st = new("UIStroke", {Thickness = 1, Color = isSel and WHITE or BORDER}, b)
+			b.Activated:Connect(function()
+				selected = n
+				delArm = nil
+				nameBox.Text = ""
+				refreshList()
+				setStatus("Selected '" .. n .. "'")
+			end)
+		end
+	end
+
+	cfgButton("Create", 1, 4, function()
+		local name = cleanName(nameBox.Text)
+		if name == "" then setStatus("Enter a config name first") return end
+		local existing = findConfig(name)
+		if existing then
+			setStatus("'" .. existing .. "' already exists - select it and press Save")
+			return
+		end
+		if writeConfig(name, snapshot()) then
+			selected = name
+			nameBox.Text = ""
+			refreshList()
+			setStatus("Created '" .. name .. "'")
+		else
+			setStatus("Could not write the config")
+		end
+	end)
+
+	cfgButton("Save", 2, 4, function()
+		if not selected then setStatus("Select a config first") return end
+		if writeConfig(selected, snapshot()) then
+			setStatus("Saved '" .. selected .. "'")
+		else
+			setStatus("Could not write the config")
+		end
+	end)
+
+	cfgButton("Load", 3, 4, function()
+		if not selected then setStatus("Select a config first") return end
+		local data = readConfig(selected)
+		if not data then
+			setStatus("Config not found")
+			refreshList()
+			return
+		end
+		if applyConfig(data) then
+			setStatus("Loaded '" .. selected .. "'")
+		else
+			setStatus("Config is corrupted")
+		end
+	end)
+
+	cfgButton("Delete", 4, 4, function()
+		if not selected then setStatus("Select a config first") return end
+		local name = selected
+		if delArm ~= name then
+			delArm = name
+			setStatus("Press Delete again to remove '" .. name .. "'")
+			task.delay(3, function()
+				if delArm == name then delArm = nil end
+			end)
+			return
+		end
+		delArm = nil
+		removeConfig(name)
+		selected = nil
+		refreshList()
+		setStatus("Deleted '" .. name .. "'")
+	end)
+
+	refreshList()
+
+	-- Menu ----------------------------------------------------------------
+	addSection(settings, "Menu")
+	addCycle(settings, "Menu Key", {"RightShift", "Insert", "RightControl", "P"}, K("MenuKey"), function(v)
+		State.MenuKey = v
+	end)
+	addToggle(settings, "Hold RMB to aim", K("HoldRMB"), function(v) State.HoldRMB = v end)
+
+
+	selectTab("Movement")
+end
+
+-- Start: FluentPro when possible, otherwise the built-in menu
+local okF, resF = pcall(startFluentUI)
+if not (okF and resF) then
+	if not okF then warn("[Red Hub Astral] " .. tostring(resF)) end
+	local okC, errC = pcall(startCustomUI)
+	if not okC then warn("[Red Hub Astral] menu failed: " .. tostring(errC)) end
+end
